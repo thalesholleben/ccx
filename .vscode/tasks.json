@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ccx auto",
+      "detail": "Monitora a cota das contas Claude Code e troca antes de bater o limite",
+      "type": "shell",
+      "command": "python",
+      "args": ["ccx.py", "auto"],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "ccx",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ccx_codex auto",
+      "detail": "Monitora a cota das contas Codex CLI e troca antes de bater o limite",
+      "type": "shell",
+      "command": "python",
+      "args": ["ccx_codex.py", "auto"],
+      "runOptions": {
+        "runOn": "folderOpen"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "group": "ccx",
+        "showReuseMessage": false,
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

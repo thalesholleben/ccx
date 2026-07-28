@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# estado real das contas nunca deveria estar aqui (fica em ~/.ccx), mas por
+# seguranca extra: nunca versionar se alguem rodar algo com HOME apontando
+# para dentro do repo.
+.ccx/
+accounts.json
+codex_accounts.json
