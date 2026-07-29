@@ -27,7 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -666,9 +666,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     target = pick_target(usage_map, args.threshold, args.strategy)
     if target and target != active:
         print(f"\n-> {args.strategy} recomenda o slot {target}")
+        print("-> troca pendente; 'status' nao acorda o monitor")
     elif not target:
         print("\n-> todas travadas em 100%, nada para onde trocar")
-    print(f"-> proxima checagem em ~{fmt_delay(next_wake(usage_map, err_map, active))}")
+    if not target or target == active:
+        print(f"-> proxima checagem em ~{fmt_delay(next_wake(usage_map, err_map, active))}")
     return 0
 
 
@@ -782,6 +784,13 @@ def cmd_auto(args: argparse.Namespace) -> int:
         guard.__exit__(None, None, None)
 
 
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Checagem silenciosa para hooks do Claude Code."""
+    with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink):
+        check_once(args)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ccx", description=__doc__.split("\n")[0])
     ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
@@ -808,6 +817,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN_S)
     p.add_argument("--once", action="store_true", help="uma checagem so, para cron")
     p.set_defaults(func=cmd_auto)
+
+    p = sub.add_parser("hook", help="checagem silenciosa para hook Stop")
+    p.set_defaults(
+        func=cmd_hook, poll=0, cooldown=DEFAULT_COOLDOWN_S, once=True
+    )
 
     args = ap.parse_args(argv)
     # Validacao: limiar acima de 100 elegeria conta travada, e poll negativo

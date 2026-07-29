@@ -4,8 +4,12 @@
 import json
 import os
 import tempfile
+import unittest.mock as mock
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import ccx
 
@@ -147,6 +151,41 @@ def test_next_wake_dorme_quando_nao_ha_decisao():
     assert ccx.next_wake(m, limpo, "2") == ccx.SLEEP_FLOOR_S
 
 
+def test_hook_checa_sem_poluir_o_stop():
+    saida = StringIO()
+    with mock.patch.object(ccx, "check_once", return_value=(2, 60)) as check:
+        with redirect_stdout(saida):
+            assert ccx.main(["hook"]) == 0
+    check.assert_called_once()
+    assert saida.getvalue() == "", "hook nao deve aparecer na conversa"
+
+
+def test_status_nao_anuncia_sono_longo_com_troca_pendente():
+    store = {
+        "slots": {
+            "1": {"email": "a@x.com"},
+            "3": {"email": "c@x.com"},
+        }
+    }
+    cotas = {
+        "1": usage(0, 97, 40),
+        "3": usage(100, 10, 35),
+    }
+    saida = StringIO()
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(
+            ccx, "collect", return_value=(cotas, {"1": "", "3": ""}, "3")
+        ),
+        redirect_stdout(saida),
+    ):
+        assert ccx.cmd_status(SimpleNamespace(threshold=85, strategy="consume-first")) == 0
+    texto = saida.getvalue()
+    assert "recomenda o slot 1" in texto
+    assert "troca pendente" in texto
+    assert "proxima checagem" not in texto
+
+
 def test_org_cai_para_oauthaccount():
     """Conta sem organizationUuid no .credentials.json pega o do oauthAccount."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -258,8 +297,6 @@ def test_parse_reset_sem_timezone():
 
 
 def test_respostas_inesperadas_nao_derrubam():
-    import unittest.mock as mock
-
     # 200 sem access_token vira transitório, não KeyError
     with mock.patch.object(ccx, "http_json", return_value={"nada": 1}):
         new, err = ccx.refresh_token({"refreshToken": "x"})

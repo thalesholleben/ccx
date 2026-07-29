@@ -69,6 +69,7 @@ existente em vez de criar um duplicado, e limpa a marca de token morto se houver
 | `ccx status` | As contas lado a lado: 5h, 7d, quando cada janela reseta, e a recomendação |
 | `ccx switch [slot]` | Troca manual. Sem argumento, rotaciona para a próxima |
 | `ccx auto` | O monitor: acompanha a cota e troca sozinho |
+| `ccx hook` | Checagem silenciosa para o evento `Stop` do Claude Code |
 
 Flags globais, válidas em qualquer subcomando:
 
@@ -145,6 +146,41 @@ insistir de 100 em 100s só piora.
 
 O jitter também evita um batimento perfeitamente periódico, que é padrão mais fácil
 de detectar do que poll irregular.
+
+### Checagem ao terminar cada resposta
+
+Polling sozinho tem uma janela inevitável: uma resposta longa pode fazer a cota
+saltar entre duas consultas. O comando `ccx hook` existe para o evento `Stop` do
+Claude Code e consulta a cota assim que cada resposta termina. Se uma conta cruzou
+o ponto de troca durante o turno, a próxima mensagem já usa a conta escolhida.
+
+O hook é silencioso, respeita o mesmo cooldown e usa o mesmo `store.lock` do
+monitor. Ele não manda prompt e não consome cota; apenas acrescenta uma leitura de
+usage por conta ao fim de cada turno. O `auto` continua rodando como fallback para
+resets e mudanças fora de uma sessão.
+
+Configuração de usuário em `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"C:/caminho/para/ccx.py\" hook",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Hooks são carregados ao abrir a sessão. Depois de instalar ou alterar essa
+configuração, encerre e abra o Claude Code novamente.
 
 ## No VS Code
 
@@ -373,10 +409,12 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 15 testes cobrindo:
+Sem framework, só `assert`. 17 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
+- execução silenciosa da checagem usada pelo hook `Stop`
+- saída do `status` sem intervalo enganoso quando há troca pendente
 - preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
 - identidade sobrevivendo à rotação de token feita pelo Claude Code
 - JSON corrompido abortando em vez de virar arquivo vazio
