@@ -22,6 +22,7 @@ Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 - [Comandos](#comandos)
 - [Estratégias de troca](#estratégias-de-troca)
 - [Intervalo de checagem](#intervalo-de-checagem)
+- [Monitor contínuo no Windows](#monitor-contínuo-no-windows)
 - [No VS Code](#no-vs-code)
 - [Como funciona por dentro](#como-funciona-por-dentro)
 - [Problemas conhecidos e como diagnosticar](#problemas-conhecidos-e-como-diagnosticar)
@@ -93,6 +94,30 @@ fazer, `3` todas as contas travadas.
 **Uma instância por máquina.** Se já existe um `auto` rodando, o segundo avisa e sai
 com código 0. Sem isso, abrir a pasta em três janelas do VS Code subiria três loops
 triplicando o tráfego e disputando a mesma troca.
+
+## Monitor contínuo no Windows
+
+Para a rotação continuar sem depender de uma janela do VS Code, instale uma vez o
+monitor do usuário atual:
+
+```powershell
+cd C:\caminho\para\ccx
+.\install-ccx-monitor.ps1
+```
+
+Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. Ela
+continua funcionando na bateria e, se o processo terminar com falha, o Agendador do
+Windows o reinicia após um minuto. Os eventos de início, erro inesperado,
+encerramento manual e troca ficam em
+`~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
+
+O `ccx auto` do VS Code fica como fallback manual: não inicia mais ao abrir a pasta,
+evitando que uma instância efêmera ocupe o lock antes do monitor permanente. Para
+remover a tarefa:
+
+```powershell
+.\install-ccx-monitor.ps1 -Uninstall
+```
 
 ## Estratégias de troca
 
@@ -185,22 +210,25 @@ configuração, encerre e abra o Claude Code novamente.
 
 ## No VS Code
 
-As tasks `ccx auto` e `ccx_codex auto` sobem junto com a pasta do repositório e o
-VS Code encerra o processo quando você fecha a janela, porque elas são filhas
-diretas do terminal integrado. O ciclo de vida já é o do VS Code nas duas
-pontas, sem precisar de código.
+A task `ccx_codex auto` sobe junto com a pasta do repositório e o VS Code encerra o
+processo quando você fecha a janela, porque ele é filho direto do terminal integrado.
+Para Claude Code, `ccx auto (fallback manual)` só deve ser usado se o monitor
+permanente não estiver instalado; a opção sem supervisão é o
+[monitor do Agendador do Windows](#monitor-contínuo-no-windows).
 
-Definidas em [`.vscode/tasks.json`](.vscode/tasks.json) com `runOn: folderOpen`.
-A apresentação é `silent`: a aba fica escondida enquanto está tudo bem e aparece
-sozinha se houver erro.
+Só `ccx_codex auto` usa `runOn: folderOpen` em
+[`.vscode/tasks.json`](.vscode/tasks.json). A apresentação é `silent`: a aba fica
+escondida enquanto está tudo bem e aparece sozinha se houver erro.
 
-**Isso exige `"task.allowAutomaticTasks": "on"` no settings.json de usuário**, em
-`%APPDATA%\Code\User\settings.json`. Não funciona no settings.json da pasta: o VS
-Code ignora essa chave vinda do workspace de propósito, senão qualquer repositório
-clonado poderia se autorizar a executar comandos na abertura.
+**Para o `ccx_codex auto`, isso exige `"task.allowAutomaticTasks": "on"` no
+settings.json de usuário**, em `%APPDATA%\Code\User\settings.json`. Não funciona
+no settings.json da pasta: o VS Code ignora essa chave vinda do workspace de
+propósito, senão qualquer repositório clonado poderia se autorizar a executar
+comandos na abertura.
 
-Só vale na **abertura da pasta**, não em Reload Window. Para subir na mão,
-`Ctrl+Shift+P` → `Tasks: Run Task` → `ccx auto`.
+O início automático do Codex só vale na **abertura da pasta**, não em Reload Window.
+Para usar o fallback manual do Claude Code, abra `Ctrl+Shift+P` → `Tasks: Run Task`
+→ `ccx auto (fallback manual)`.
 
 Fora do VS Code, `ccx-auto.cmd` faz o mesmo com um duplo clique, de qualquer
 diretório.
@@ -348,10 +376,11 @@ e-mail, bloco `claudeAiOauth`, `oauthAccount` e `org_uuid`.
 
 ## Problemas conhecidos e como diagnosticar
 
-**"A task não sobe com o VS Code."** Confira `task.allowAutomaticTasks` no
-settings.json de **usuário**, não no da pasta. Depois teste na mão com
-`Tasks: Run Task`. Se subir na mão mas não na abertura, o suspeito seguinte é
-Workspace Trust.
+**"`ccx_codex auto` não sobe com o VS Code."** Confira
+`task.allowAutomaticTasks` no settings.json de **usuário**, não no da pasta. Depois
+teste na mão com `Tasks: Run Task`. Se subir na mão mas não na abertura, o suspeito
+seguinte é Workspace Trust. O monitor do Claude Code não depende do VS Code depois
+de instalado pelo `install-ccx-monitor.ps1`.
 
 **Saber se o `auto` está vivo:**
 
@@ -362,6 +391,10 @@ python -c "import os,time; p=os.path.expanduser('~/.ccx/auto.lock'); print('vivo
 Lock existindo com mtime velho significa processo morto sem limpar. A próxima
 execução toma o lock automaticamente pela regra de staleness, não precisa apagar
 na mão.
+
+**Saber por que o monitor permanente reiniciou:** abra `~/.ccx/auto.log` e confira
+o estado da tarefa `\CCX\Claude Monitor` no Agendador do Windows. O log registra
+só eventos operacionais, nunca tokens.
 
 **Conta aparece com `?` na cota.** O `status` mostra o motivo ao lado (`HTTP 429`,
 `timeout`, `token morto`). Um 429 no endpoint de usage derruba o poll para a faixa
@@ -410,11 +443,12 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 17 testes cobrindo:
+Sem framework, só `assert`. 19 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
 - execução silenciosa da checagem usada pelo hook `Stop`
+- continuidade do monitor após erro inesperado
 - saída do `status` sem intervalo enganoso quando há troca pendente
 - preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
 - identidade sobrevivendo à rotação de token feita pelo Claude Code

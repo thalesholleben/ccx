@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import unittest.mock as mock
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
@@ -364,6 +364,25 @@ def test_lock_libera():
         with ccx.claude_lock(target):
             assert lock.is_dir()
         assert not lock.exists(), "lock ficou pendurado"
+
+
+def test_auto_sobrevive_a_erro_inesperado():
+    """Um erro fora dos ramos esperados nao pode encerrar a rotacao."""
+    args = SimpleNamespace(
+        once=False, strategy="consume-first", threshold=85, poll=0, cooldown=300
+    )
+    saida = StringIO()
+    with (
+        mock.patch.object(ccx, "load_store", return_value={"slots": {"1": {}, "2": {}}}),
+        mock.patch.object(ccx, "claude_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "check_once", side_effect=ValueError("inesperado")),
+        mock.patch.object(ccx, "auto_event") as event,
+        mock.patch.object(ccx.time, "sleep", side_effect=KeyboardInterrupt),
+        redirect_stdout(saida),
+    ):
+        assert ccx.cmd_auto(args) == 0
+    assert "erro no monitor: ValueError" in saida.getvalue()
+    assert any("erro no monitor: ValueError" in call.args[0] for call in event.call_args_list)
 
 
 def test_token_expirado():

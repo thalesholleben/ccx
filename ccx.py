@@ -60,6 +60,7 @@ POLL_TIGHTEN_AT = 70.0
 SLEEP_CAP_S = 3600.0
 SLEEP_FLOOR_S = 60.0
 SLEEP_MARGIN_S = 15.0
+AUTO_LOG_MAX_BYTES = 512 * 1024
 
 _SSL_CTX: ssl.SSLContext | None = None
 
@@ -116,6 +117,20 @@ def write_json(path: Path, data: dict) -> None:
         os.unlink(tmp)
         raise
     os.replace(tmp, path)
+
+
+def auto_event(message: str) -> None:
+    """Registra eventos raros do monitor sem incluir credenciais no log."""
+    try:
+        path = STORE.parent / "auto.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size >= AUTO_LOG_MAX_BYTES:
+            os.replace(path, path.with_suffix(".log.1"))
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        # O monitor continua sendo mais importante que o log diagnostico.
+        pass
 
 
 @contextmanager
@@ -693,6 +708,7 @@ def do_switch(store: dict, key: str) -> None:
         store["last_switch"] = time.time()
         write_json(STORE, store)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
+    auto_event(f"troca para o slot {key}")
 
 
 def cmd_switch(args: argparse.Namespace) -> int:
@@ -781,6 +797,9 @@ def cmd_auto(args: argparse.Namespace) -> int:
         f"ccx auto: {args.strategy}, limiar {args.threshold}%, poll {faixa}. "
         "Ctrl+C para sair."
     )
+    auto_event(
+        f"monitor iniciado ({args.strategy}, limiar {args.threshold}%, poll {faixa})"
+    )
     try:
         while True:
             try:
@@ -788,9 +807,18 @@ def cmd_auto(args: argparse.Namespace) -> int:
             except TimeoutError as e:
                 print(f"[{time.strftime('%H:%M:%S')}] {e}")
                 delay = random.uniform(*POLL_WIDE)
+            except Exception as e:
+                # Uma falha inesperada de disco/rede nao pode abandonar a rotacao.
+                delay = random.uniform(*POLL_WIDE)
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] erro no monitor: "
+                    f"{type(e).__name__}; tentando de novo em {fmt_delay(delay)}"
+                )
+                auto_event(f"erro no monitor: {type(e).__name__}; nova tentativa em {fmt_delay(delay)}")
             time.sleep(delay)
     except KeyboardInterrupt:
         print("\nsaindo")
+        auto_event("monitor encerrado por interrupcao")
         return 0
     finally:
         guard.__exit__(None, None, None)
