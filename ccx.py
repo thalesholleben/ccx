@@ -6,6 +6,7 @@ de 5h e nao consome cota).
 
     ccx add                captura a conta logada agora num slot
     ccx status             as contas lado a lado
+    ccx stats              status consolidado de Claude Code e Codex
     ccx switch [n]         troca manual
     ccx auto               monitora e troca sozinho
 
@@ -674,6 +675,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stats(args: argparse.Namespace) -> int:
+    """Mostra os status de Claude Code e Codex em uma unica saida."""
+    print("=== Claude Code ===")
+    claude_code = cmd_status(args)
+    print("\n=== Codex CLI ===")
+    import ccx_codex
+
+    codex_code = ccx_codex.cmd_status(args)
+    return 0 if 0 in (claude_code, codex_code) else 1
+
+
 def do_switch(store: dict, key: str) -> None:
     slot = store["slots"][key]
     with store_lock():
@@ -805,6 +817,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("status", help="as contas lado a lado")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("stats", help="status consolidado de Claude Code e Codex")
+    p.set_defaults(func=cmd_stats)
 
     p = sub.add_parser("switch", help="troca manual")
     p.add_argument("slot", nargs="?")

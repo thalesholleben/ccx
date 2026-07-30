@@ -67,6 +67,7 @@ existente em vez de criar um duplicado, e limpa a marca de token morto se houver
 | --- | --- |
 | `ccx add [slot]` | Captura a conta logada agora. Sem argumento, usa o próximo número livre |
 | `ccx status` | As contas lado a lado: 5h, 7d, quando cada janela reseta, e a recomendação |
+| `ccx stats` | Status consolidado de todas as contas Claude Code e Codex CLI |
 | `ccx switch [slot]` | Troca manual. Sem argumento, rotaciona para a próxima |
 | `ccx auto` | O monitor: acompanha a cota e troca sozinho |
 | `ccx hook` | Checagem silenciosa para o evento `Stop` do Claude Code |
@@ -444,6 +445,9 @@ python ccx_codex.py add
 
 # confira
 python ccx_codex.py status
+
+# veja Claude Code e Codex na mesma saída
+python ccx.py stats
 
 # monitor automático (precisa de 2+ contas)
 python ccx_codex.py auto

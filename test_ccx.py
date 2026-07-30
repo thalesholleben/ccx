@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ccx
+import ccx_codex
 
 
 def usage(pct5, pct7, weekly_in_h, h5_in_h=1):
@@ -184,6 +185,21 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
     assert "recomenda o slot 1" in texto
     assert "troca pendente" in texto
     assert "proxima checagem" not in texto
+
+
+def test_stats_consolida_claude_e_codex():
+    saida = StringIO()
+    args = SimpleNamespace(threshold=85, strategy="consume-first")
+    with (
+        mock.patch.object(ccx, "cmd_status", return_value=0) as claude_status,
+        mock.patch.object(ccx_codex, "cmd_status", return_value=0) as codex_status,
+        redirect_stdout(saida),
+    ):
+        assert ccx.cmd_stats(args) == 0
+    claude_status.assert_called_once_with(args)
+    codex_status.assert_called_once_with(args)
+    assert "=== Claude Code ===" in saida.getvalue()
+    assert "=== Codex CLI ===" in saida.getvalue()
 
 
 def test_org_cai_para_oauthaccount():
