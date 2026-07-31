@@ -23,9 +23,6 @@
       "type": "shell",
       "command": "python",
       "args": ["ccx_codex.py", "auto"],
-      "runOptions": {
-        "runOn": "folderOpen"
-      },
       "isBackground": true,
       "presentation": {
         "reveal": "silent",

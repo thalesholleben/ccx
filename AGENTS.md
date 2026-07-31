@@ -18,8 +18,8 @@ CLI ja usam.
 ## Comandos de validacao
 
 ```bash
-python test_ccx.py         # 15 testes, engine de decisao + IO do modulo Claude
-python test_ccx_codex.py   # 12 testes, especifico do modulo Codex
+python test_ccx.py         # 31 testes, engine de decisao + IO do modulo Claude
+python test_ccx_codex.py   # 17 testes, especifico do modulo Codex
 ```
 
 Sem framework de teste, so `assert` e um runner minimo no final de cada
@@ -42,6 +42,20 @@ arquivo. Rodar os dois antes de qualquer PR.
   (`pick_target`, `band_delay`, `next_wake`) e os primitivos de lock/IO. Nao
   duplicar essas funcoes; se algo generico precisar mudar, muda em `ccx.py` e
   o modulo Codex herda.
+- `status`, `hook` e `auto` compartilham `usage_cache`. Qualquer coleta deve
+  adquirir o lock e reler o store antes de decidir o que consultar: processos
+  concorrentes podem ter preenchido o cache enquanto este processo esperava.
+- `HTTP 429` na leitura de uso e falha de medicao, nao prova de cota esgotada.
+  Sem leitura conhecida, manter a ativa. Se uma leitura recente ja a confirmou
+  esgotada, ela pode orientar a troca mesmo que a releitura tenha dado 429.
+- `do_switch` deve reler o store depois de adquirir o lock. A coleta solta o
+  lock antes da decisao, e gravar o snapshot antigo pode ressuscitar refresh
+  token ou apagar cache que outro hook acabou de salvar.
+- A troca do arquivo global de autenticacao serve para uso sequencial. Um
+  processo persistente do Codex pode manter a identidade em memoria e nao
+  migrar de conta. Nao documentar esse hot-swap como isolamento seguro entre
+  agentes paralelos; isso exige perfis por processo (`CODEX_HOME` /
+  `CLAUDE_CONFIG_DIR`) ou um proxy com afinidade de sessao.
 - Nunca commitar `~/.ccx/accounts.json` ou `~/.ccx/codex_accounts.json`
   (tokens OAuth reais). Ja estao no `.gitignore`.
 

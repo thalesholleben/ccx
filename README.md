@@ -13,6 +13,16 @@ prompt nenhum. Ver [Termos de uso](#termos-de-uso).
 Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 [Módulo Codex (ccx_codex)](#módulo-codex-ccx_codex).
 
+> [!IMPORTANT]
+> O modo de troca atual escreve a credencial **global** do cliente. Ele serve
+> para uso sequencial ou para várias sessões que deliberadamente compartilham
+> uma única identidade; não é um balanceador por agente e não migra com
+> segurança processos persistentes já abertos. Para contas simultâneas, o
+> padrão suportado pelos clientes é iniciar cada processo com um perfil isolado:
+> [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) no Claude e
+> [`CODEX_HOME`](https://developers.openai.com/codex/auth#credential-storage)
+> no Codex. O `ccx` ainda não orquestra esses perfis.
+
 ---
 
 ## Sumário
@@ -67,7 +77,7 @@ existente em vez de criar um duplicado, e limpa a marca de token morto se houver
 | Comando | O que faz |
 | --- | --- |
 | `ccx add [slot]` | Captura a conta logada agora. Sem argumento, usa o próximo número livre |
-| `ccx status` | As contas lado a lado: 5h, 7d, quando cada janela reseta, e a recomendação |
+| `ccx status` | As contas lado a lado: 5h, 7d, resets e recomendação; reutiliza a leitura recente |
 | `ccx stats` | Status consolidado de todas as contas Claude Code e Codex CLI |
 | `ccx switch [slot]` | Troca manual. Sem argumento, rotaciona para a próxima |
 | `ccx auto` | O monitor: acompanha a cota e troca sozinho |
@@ -95,6 +105,9 @@ fazer, `3` todas as contas travadas.
 com código 0. Sem isso, abrir a pasta em três janelas do VS Code subiria três loops
 triplicando o tráfego e disputando a mesma troca.
 
+`status`, `hook` e `auto` também compartilham um cache em disco. Rodar `status`
+várias vezes seguidas não gera uma nova consulta por conta a cada execução.
+
 ## Monitor contínuo no Windows
 
 Para a rotação continuar sem depender de uma janela do VS Code, instale uma vez o
@@ -106,9 +119,11 @@ cd C:\caminho\para\ccx
 ```
 
 Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. A
-tarefa executa um watchdog a cada minuto: ele só lê o heartbeat local do monitor
+tarefa executa um watchdog a cada minuto: ele só lê o lock local do monitor
 (não consulta usage) e relança o `ccx auto` em processo destacado se ele morrer. Ela
-continua funcionando na bateria. Os eventos de início, erro inesperado,
+continua funcionando na bateria. O lock interno registra o PID do dono: processo
+morto é retomado sem esperar o timeout, enquanto um processo apenas suspenso não
+ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
 encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
 
@@ -145,6 +160,12 @@ fazer e ele avisa.
 Conta com cota desconhecida (erro de rede, token morto) nunca é escolhida
 automaticamente, mas segue sendo alvo válido de um `switch` explícito.
 
+Um erro ao medir a **conta ativa**, inclusive `HTTP 429`, não prova que uma chamada
+ao modelo esgotou a cota. Sem leitura anterior confiável, o monitor mantém a conta
+atual. Se ela foi confirmada como esgotada nos últimos 5 minutos e a releitura deu
+429, essa última leitura ainda pode orientar a troca para uma conta conhecida — sem
+depender de um erro de medição isolado.
+
 ## Intervalo de checagem
 
 Polling só serve para decidir uma troca, e decisão de troca exige **duas contas
@@ -171,6 +192,12 @@ quando a primeira volta.
 **Erro em qualquer conta:** cai para a faixa larga. Se o endpoint devolveu 429,
 insistir de 100 em 100s só piora.
 
+**Cache compartilhado:** uma leitura válida é reaproveitada por até 30s; um erro,
+por até 120s. O cache fica no mesmo store protegido por lock e é relido depois de
+adquirir o lock. Assim, se quatro agentes terminarem juntos, o primeiro consulta e
+os outros reutilizam o resultado em vez de fazer quatro varreduras completas, sem
+atrasar o próximo poll dinâmico.
+
 O jitter também evita um batimento perfeitamente periódico, que é padrão mais fácil
 de detectar do que poll irregular.
 
@@ -178,13 +205,12 @@ de detectar do que poll irregular.
 
 Polling sozinho tem uma janela inevitável: uma resposta longa pode fazer a cota
 saltar entre duas consultas. O comando `ccx hook` existe para o evento `Stop` do
-Claude Code e consulta a cota assim que cada resposta termina. Se uma conta cruzou
-o ponto de troca durante o turno, a próxima mensagem já usa a conta escolhida.
+Claude Code e pede uma checagem assim que cada resposta termina. Se a leitura
+compartilhada ainda estiver recente, ele não consulta a rede novamente.
 
 O hook é silencioso, respeita o mesmo cooldown e usa o mesmo `store.lock` do
-monitor. Ele não manda prompt e não consome cota; apenas acrescenta uma leitura de
-usage por conta ao fim de cada turno. O `auto` continua rodando como fallback para
-resets e mudanças fora de uma sessão.
+monitor. Ele não manda prompt e não consome cota. O `auto` continua rodando como
+fallback para resets e mudanças fora de uma sessão.
 
 Configuração de usuário em `~/.claude/settings.json`:
 
@@ -211,25 +237,18 @@ configuração, encerre e abra o Claude Code novamente.
 
 ## No VS Code
 
-A task `ccx_codex auto` sobe junto com a pasta do repositório e o VS Code encerra o
-processo quando você fecha a janela, porque ele é filho direto do terminal integrado.
-Para Claude Code, `ccx auto (fallback manual)` só deve ser usado se o monitor
-permanente não estiver instalado; a opção sem supervisão é o
-[monitor do Agendador do Windows](#monitor-contínuo-no-windows).
+Este repositório não instala uma task automática do VS Code. No Windows, a opção
+sem supervisão para Claude é o
+[monitor do Agendador](#monitor-contínuo-no-windows), independente da janela do
+editor.
 
-Só `ccx_codex auto` usa `runOn: folderOpen` em
-[`.vscode/tasks.json`](.vscode/tasks.json). A apresentação é `silent`: a aba fica
-escondida enquanto está tudo bem e aparece sozinha se houver erro.
+Use `Tasks: Run Task` → `ccx auto (fallback manual)` somente quando o monitor
+permanente não estiver instalado ou durante diagnóstico. Não é preciso executar a
+task a cada troca, a cada `status` nem quando um agente termina.
 
-**Para o `ccx_codex auto`, isso exige `"task.allowAutomaticTasks": "on"` no
-settings.json de usuário**, em `%APPDATA%\Code\User\settings.json`. Não funciona
-no settings.json da pasta: o VS Code ignora essa chave vinda do workspace de
-propósito, senão qualquer repositório clonado poderia se autorizar a executar
-comandos na abertura.
-
-O início automático do Codex só vale na **abertura da pasta**, não em Reload Window.
-Para usar o fallback manual do Claude Code, abra `Ctrl+Shift+P` → `Tasks: Run Task`
-→ `ccx auto (fallback manual)`.
+Não mantenha `ccx_codex auto` junto da extensão do Codex: a extensão usa um processo
+persistente que pode continuar com a identidade carregada na inicialização mesmo
+depois de `auth.json` mudar.
 
 Fora do VS Code, `ccx-auto.cmd` faz o mesmo com um duplo clique, de qualquer
 diretório.
@@ -271,7 +290,7 @@ código dele:
 - O artefato é um **diretório** em `<alvo>.lock` (`~/.claude.lock`,
   `~/.claude.json.lock`). A atomicidade do `mkdir` é o mutex.
 - Considera-se morto quando o mtime passa de 10s. Quem segura toca o mtime a cada
-  5s para provar que está vivo, e um lock morto pode ser tomado.
+  3s para provar que está vivo, e um lock morto pode ser tomado.
 - O Claude Code tenta 5 vezes com sleeps de 1 a 2s antes de desistir, então segurar
   por meio segundo é totalmente cooperativo.
 
@@ -283,6 +302,8 @@ credencial nova (não expirada) e ele aborta o próprio refresh.
 
 O mesmo mecanismo de lock é reusado para a trava de instância única do `auto`, em
 `~/.ccx/auto.lock`, com timeout 0 para falhar na hora em vez de esperar.
+Somente os locks internos do CCX (`auto` e `store`) recebem um arquivo de dono com
+PID; os locks do próprio Claude Code continuam vazios e seguem o protocolo original.
 
 ### Concorrência entre os próprios comandos
 
@@ -296,6 +317,15 @@ terminal enquanto o `auto` rodava fazia os dois renovarem o mesmo refresh token
 ao mesmo tempo. A rotação no servidor invalida a cópia de quem perdeu a corrida,
 e a credencial guardada morre com `invalid_grant`, sem erro visível até você
 tentar voltar para aquela conta e descobrir que ela não existe mais.
+
+O mesmo ponto também protege o cache de usage. Depois de conseguir o lock, cada
+processo relê o store antes de decidir se consulta a rede. Isso importa porque um
+hook pode ter carregado o arquivo enquanto outro ainda estava consultando; sem a
+releitura, os dois fariam a mesma chamada mesmo estando serializados.
+
+`do_switch` faz a mesma releitura antes da escrita final. Isso evita que uma decisão
+já calculada apague o refresh token ou o cache que outro hook gravou enquanto ela
+esperava o lock.
 
 Pelo mesmo motivo, `apply_slot` segura os **dois** locks do Claude Code durante a
 troca inteira, em vez de um por escrita. Entre gravar a credencial e gravar o
@@ -377,33 +407,30 @@ e-mail, bloco `claudeAiOauth`, `oauthAccount` e `org_uuid`.
 
 ## Problemas conhecidos e como diagnosticar
 
-**"`ccx_codex auto` não sobe com o VS Code."** Confira
-`task.allowAutomaticTasks` no settings.json de **usuário**, não no da pasta. Depois
-teste na mão com `Tasks: Run Task`. Se subir na mão mas não na abertura, o suspeito
-seguinte é Workspace Trust. O monitor do Claude Code não depende do VS Code depois
-de instalado pelo `install-ccx-monitor.ps1`.
-
 **Saber se o `auto` está vivo:**
 
 ```bash
-python -c "import os,time; p=os.path.expanduser('~/.ccx/auto.lock'); print('vivo' if os.path.isdir(p) and time.time()-os.stat(p).st_mtime < 10 else 'morto')"
+python -c "import ccx_watchdog; print('vivo' if ccx_watchdog.monitor_alive() else 'morto')"
 ```
 
-Lock existindo com mtime velho significa processo morto sem limpar. A próxima
-execução toma o lock automaticamente pela regra de staleness, não precisa apagar
-na mão.
+Para os locks internos do CCX, PID vivo com heartbeat velho pode ser apenas uma
+suspensão: o watchdog não duplica o monitor nesse caso. PID morto (ou lock legado
+sem dono com mtime velho) é tomado automaticamente; não apague o lock na mão.
 
 **Saber por que o monitor permanente reiniciou:** abra `~/.ccx/auto.log` e confira
 o estado da tarefa `\CCX\Claude Monitor` no Agendador do Windows. O log registra
 só eventos operacionais, nunca tokens.
 
 **Conta aparece com `?` na cota.** O `status` mostra o motivo ao lado (`HTTP 429`,
-`timeout`, `token morto`). Um 429 no endpoint de usage derruba o poll para a faixa
-larga sozinho.
+`timeout`, `token morto`). Um 429 no endpoint de usage é armazenado por 120s e
+derruba o poll para a faixa larga. Não repita `status` tentando fazê-lo sumir.
 
-**Trocou mas o Claude Code continua na conta antiga.** No Windows e no Linux a
-credencial nova é lida na próxima requisição. Se estiver no meio de um turno, vale a
-partir do turno seguinte.
+**Trocou mas o cliente continua na conta antiga.** Reinicie aquela sessão. Não há
+garantia de recarga dinâmica para todo processo persistente. O Codex oficial, em
+particular, mantém um snapshot em memória e não observa alteração externa de
+`auth.json` até um reload explícito; também recusa cruzar a identidade da sessão
+para outra conta/workspace sem reconstruir seu estado
+([fonte](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
 
 ## Limitações
 
@@ -419,7 +446,11 @@ partir do turno seguinte.
   `limits` com entradas `weekly_scoped`, que hoje é ignorado. Se você trabalha
   fixado num modelo e bate o limite dele antes das janelas gerais, esse ramo
   precisaria entrar na decisão.
-- **Uma troca no meio de um turno em andamento** vale a partir do turno seguinte.
+- **A troca é global, não por agente.** Várias sessões abertas no mesmo perfil
+  podem manter credenciais em memória, disputar refresh ou continuar na identidade
+  anterior. Para paralelismo real, use processos separados desde o início com
+  `CLAUDE_CONFIG_DIR`/`CODEX_HOME`; agentes internos de uma mesma sessão continuam
+  compartilhando a conta daquela sessão.
 
 ## Termos de uso
 
@@ -444,13 +475,18 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 20 testes cobrindo:
+Sem framework, só `assert`. 31 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
 - execução silenciosa da checagem usada pelo hook `Stop`
 - continuidade do monitor após erro inesperado
-- watchdog relançando somente monitor sem heartbeat
+- watchdog relançando somente monitor morto, sem duplicar processo suspenso
+- retomada com `timeout=0` removendo lock morto sem tomar lock vivo
+- cache/debounce compartilhado, inclusive releitura depois de esperar o lock
+- `HTTP 429` de usage mantendo a ativa sem histórico e trocando quando há
+  confirmação recente de esgotamento
+- troca relendo o store para não perder refresh token/cache concorrente
 - saída do `status` sem intervalo enganoso quando há troca pendente
 - preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
 - identidade sobrevivendo à rotação de token feita pelo Claude Code
@@ -485,7 +521,7 @@ python ccx_codex.py status
 # veja Claude Code e Codex na mesma saída
 python ccx.py stats
 
-# monitor automático (precisa de 2+ contas)
+# somente para invocações sequenciais/frescas; não use com extensão/app-server aberto
 python ccx_codex.py auto
 ```
 
@@ -515,17 +551,15 @@ só troque `ccx.py` por `ccx_codex.py`. `ccx-codex-auto.cmd` faz o mesmo que
   curta, ~5h) e `secondary_window` (semanal), mapeados para os mesmos rótulos
   `5h`/`7d` que o resto do código já entende, então a engine de decisão do
   `ccx.py` funciona sem nenhuma alteração.
-- **Sem lock cooperativo confirmado com o Codex CLI real.** O módulo Claude
-  segura o lock de diretório que o próprio Claude Code usa no refresh, lido
-  do código dele. Para o Codex CLI não há confirmação equivalente: o
-  [codex-lb](https://github.com/Soju06/codex-lb), projeto que inspirou este
-  módulo, é um proxy de rede e nunca escreve `auth.json` local por baixo de
-  um Codex CLI rodando, então não serviu de referência para esse ponto
-  específico. A escrita continua atômica (arquivo temporário + `os.replace`),
-  mas trocar no instante exato em que o Codex CLI está renovando o próprio
-  token é uma janela de corrida que este módulo não cobre. Evite rodar
-  `ccx_codex auto` enquanto usa o Codex CLI ativamente no mesmo segundo em
-  que uma troca cair.
+- **Processos persistentes mantêm a identidade em memória.** O `AuthManager`
+  oficial carrega `auth.json` uma vez, só observa mudanças externas após reload
+  explícito e protege a identidade original da sessão. Portanto,
+  `ccx_codex switch/auto` altera invocações **novas**, mas não migra com segurança
+  a extensão, app-server ou agentes já abertos. Uma sessão antiga ainda pode
+  tentar renovar o token anterior e terminar em 401
+  ([código oficial](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
+  Para contas paralelas, use um `CODEX_HOME` isolado por processo. Essa
+  orquestração ainda não faz parte do `ccx`.
 - **Workspace em vez de organização.** O aviso de cota compartilhada usa
   `workspace_id` (seats de Team/Enterprise) em vez do `organizationUuid` do
   Claude Code.
@@ -547,11 +581,13 @@ reposiciona a credencial que o Codex CLI oficial usa.
 python test_ccx_codex.py
 ```
 
-Mesmo estilo do `test_ccx.py`, cobrindo o que é específico do Codex: leitura
+Mesmo estilo do `test_ccx.py`, com 17 testes cobrindo o que é específico do Codex: leitura
 de claims do JWT, expiração via `exp`, classificação de erro de refresh
 (permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
 para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na
-troca, e identidade sobrevivendo à rotação de refresh token.
+troca, identidade sobrevivendo à rotação de refresh token, cache compartilhado,
+429 de usage com decisão baseada em histórico recente e troca sem sobrescrever
+estado concorrente.
 
 ## Licença
 

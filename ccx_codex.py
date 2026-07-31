@@ -239,6 +239,7 @@ def load_store() -> dict:
     s = ccx.read_json(STORE)
     s.setdefault("slots", {})
     s.setdefault("last_switch", 0)
+    s.setdefault("usage_cache", {})
     return s
 
 
@@ -337,11 +338,23 @@ def slot_usage(key: str, slot: dict, is_active: bool, store: dict) -> tuple[dict
 
 def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | None]:
     with store_lock():
+        fresh = load_store()
+        store.clear()
+        store.update(fresh)
         active = active_slot(store)
         sync_active_slot(store, active)
         usage_map, err_map = {}, {}
+        now = time.time()
+        changed = False
         for key, slot in store["slots"].items():
-            usage_map[key], err_map[key] = slot_usage(key, slot, key == active, store)
+            cached = ccx.cached_slot_usage(store, key, now)
+            if cached is None:
+                cached = slot_usage(key, slot, key == active, store)
+                ccx.remember_slot_usage(store, key, *cached, now)
+                changed = True
+            usage_map[key], err_map[key] = cached
+        if changed:
+            ccx.write_json(STORE, store)
     return usage_map, err_map, active
 
 
@@ -392,6 +405,7 @@ def _add(args: argparse.Namespace) -> int:
             workspace_id=ident.get("workspace_id", ""),
         )
         slot.pop("dead", None)
+        store.get("usage_cache", {}).pop(existing, None)
         ccx.write_json(STORE, store)
         print(f"slot {existing} atualizado: {email}")
         return 0
@@ -442,20 +456,38 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"{ccx.fmt_window(usage, '7d')} {ccx.fmt_reset(usage, '7d'):>7}{tag}"
         )
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
+    hold_active = ccx.hold_active_on_unknown_usage(store, usage_map, active)
     if target and target != active:
         print(f"\n-> {args.strategy} recomenda o slot {target}")
+        if hold_active:
+            print(
+                f"-> monitor mantem o slot {active}: erro da conta ativa nao "
+                "confirma falta de cota"
+            )
+        else:
+            print("-> troca pendente; monitor aplica automaticamente")
     elif not target:
         print("\n-> todas travadas em 100%, nada para onde trocar")
-    print(f"-> proxima checagem em ~{ccx.fmt_delay(ccx.next_wake(usage_map, err_map, active))}")
+    if not target or target == active or hold_active:
+        print(
+            f"-> proxima checagem em "
+            f"~{ccx.fmt_delay(ccx.next_wake(usage_map, err_map, active))}"
+        )
     return 0
 
 
 def do_switch(store: dict, key: str) -> None:
-    slot = store["slots"][key]
     with store_lock():
+        fresh = load_store()
+        slot = fresh["slots"].get(key)
+        if slot is None:
+            raise ValueError(f"Slot {key} nao existe mais.")
         apply_slot(slot)
-        store["last_switch"] = time.time()
-        ccx.write_json(STORE, store)
+        fresh["last_switch"] = time.time()
+        fresh.get("usage_cache", {}).pop(key, None)
+        ccx.write_json(STORE, fresh)
+        store.clear()
+        store.update(fresh)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
 
 
@@ -484,11 +516,7 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
     delay = float(args.poll) if args.poll else ccx.next_wake(usage_map, err_map, active)
     stamp = time.strftime("%H:%M:%S")
-    if (
-        active
-        and usage_map.get(active) is None
-        and not store["slots"].get(active, {}).get("dead")
-    ):
+    if ccx.hold_active_on_unknown_usage(store, usage_map, active):
         print(
             f"[{stamp}] cota do slot {active} ilegivel ({err_map.get(active)}), "
             "mantendo a conta atual"

@@ -54,6 +54,11 @@ FAR_FUTURE = datetime(9999, 1, 1, tzinfo=timezone.utc)
 POLL_WIDE = (180.0, 240.0)
 POLL_TIGHT = (100.0, 120.0)
 POLL_TIGHTEN_AT = 70.0
+# Todos os processos (monitor, hook e status) compartilham este cache em disco.
+# Os TTLs ficam abaixo do menor poll para amortecer rajadas sem atrasar o monitor.
+USAGE_CACHE_TTL_S = 30.0
+USAGE_ERROR_CACHE_TTL_S = 120.0
+USAGE_STALE_DECISION_TTL_S = 300.0
 # Com menos de 2 contas utilizaveis nao ha decisao de troca a tomar, entao nao
 # se faz polling: dorme ate o reset conhecido da primeira que volta. O teto e
 # seguro barato caso o resets_at venha errado ou mude.
@@ -61,6 +66,7 @@ SLEEP_CAP_S = 3600.0
 SLEEP_FLOOR_S = 60.0
 SLEEP_MARGIN_S = 15.0
 AUTO_LOG_MAX_BYTES = 512 * 1024
+LOCK_OWNER_FILE = "owner.json"
 
 _SSL_CTX: ssl.SSLContext | None = None
 
@@ -133,6 +139,79 @@ def auto_event(message: str) -> None:
         pass
 
 
+def lock_owner(lock_dir: Path) -> dict:
+    """Metadados do dono do lock, ou {} para locks legados/incompletos."""
+    try:
+        owner = read_json(lock_dir / LOCK_OWNER_FILE)
+    except (CorruptFile, OSError):
+        return {}
+    return owner if isinstance(owner, dict) else {}
+
+
+def lock_owner_pid(lock_dir: Path) -> int | None:
+    try:
+        pid = int(lock_owner(lock_dir).get("pid"))
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def process_alive(pid: int) -> bool:
+    """Teste portavel de existencia de PID para nao duplicar um monitor suspenso."""
+    if os.name == "nt":
+        # No Windows, os.kill(pid, 0) nao e uma sondagem inofensiva como no
+        # POSIX: sinais numericos sao encaminhados para TerminateProcess.
+        # Consulta o handle em vez de mandar qualquer sinal.
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _rmdir_lock(lock_dir: Path) -> bool:
+    try:
+        os.rmdir(lock_dir)
+    except OSError:
+        return False
+    return True
+
+
+def discard_lock(lock_dir: Path, owner_id: str | None = None) -> bool:
+    """Remove lock orfao; owner_id impede apagar uma nova instancia por engano."""
+    if owner_id is not None and lock_owner(lock_dir).get("id") != owner_id:
+        return False
+    try:
+        (lock_dir / LOCK_OWNER_FILE).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    return _rmdir_lock(lock_dir)
+
+
 @contextmanager
 def claude_lock(target: Path, timeout: float = LOCK_TIMEOUT_S):
     """Segura o lock do Claude Code (diretorio <target>.lock, mkdir e o mutex).
@@ -143,27 +222,46 @@ def claude_lock(target: Path, timeout: float = LOCK_TIMEOUT_S):
     lock_dir = target.parent / (target.name + ".lock")
     lock_dir.parent.mkdir(parents=True, exist_ok=True)
     start = time.monotonic()
+    internal_lock = lock_dir.parent == STORE.parent
+    owner = {
+        "pid": os.getpid(),
+        "id": f"{os.getpid()}-{time.time_ns()}-{random.randrange(1 << 30)}",
+    }
     while True:
         try:
             os.mkdir(lock_dir)
+            if internal_lock:
+                try:
+                    write_json(lock_dir / LOCK_OWNER_FILE, owner)
+                except BaseException:
+                    discard_lock(lock_dir)
+                    raise
             break
         except FileExistsError:
             pass
-        if time.monotonic() - start > timeout:
-            raise TimeoutError(
-                f"{lock_dir.name} preso: Claude Code parece estar renovando o "
-                "token. Tente de novo em alguns segundos."
-            )
         try:
             age = time.time() - os.stat(lock_dir).st_mtime
         except FileNotFoundError:
             continue
-        if age > LOCK_STALE_S:
-            try:
-                os.rmdir(lock_dir)
-            except OSError:
-                time.sleep(0.05)
-            continue
+        other_owner = lock_owner(lock_dir) if internal_lock else {}
+        other_pid = lock_owner_pid(lock_dir) if internal_lock else None
+        # PID morto prova que o lock ficou orfao mesmo antes do timeout. Lock
+        # sem owner e legado: nesse caso conserva a regra por idade.
+        stale = internal_lock and other_pid is not None and not process_alive(other_pid)
+        stale = stale or (other_pid is None and age > LOCK_STALE_S)
+        if stale:
+            removed = (
+                discard_lock(lock_dir, other_owner.get("id"))
+                if internal_lock
+                else _rmdir_lock(lock_dir)
+            )
+            if removed:
+                continue
+        if timeout <= 0 or time.monotonic() - start > timeout:
+            raise TimeoutError(
+                f"{lock_dir.name} preso: Claude Code parece estar renovando o "
+                "token. Tente de novo em alguns segundos."
+            )
         time.sleep(0.25 + random.random() * 0.25)
 
     stop = threading.Event()
@@ -182,10 +280,10 @@ def claude_lock(target: Path, timeout: float = LOCK_TIMEOUT_S):
     finally:
         stop.set()
         t.join(timeout=1.0)
-        try:
-            os.rmdir(lock_dir)
-        except OSError:
-            pass
+        if internal_lock:
+            discard_lock(lock_dir, owner["id"])
+        else:
+            _rmdir_lock(lock_dir)
 
 
 # --------------------------------------------------------------------------
@@ -316,7 +414,55 @@ def load_store() -> dict:
     s = read_json(STORE)
     s.setdefault("slots", {})
     s.setdefault("last_switch", 0)
+    s.setdefault("usage_cache", {})
     return s
+
+
+def cached_slot_usage(
+    store: dict, key: str, now: float
+) -> tuple[dict | None, str] | None:
+    entry = store.get("usage_cache", {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        age = now - float(entry["at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    error = entry.get("error") or ""
+    ttl = USAGE_ERROR_CACHE_TTL_S if error else USAGE_CACHE_TTL_S
+    if not 0 <= age < ttl:
+        return None
+    usage = entry.get("usage")
+    if usage is None and not error:
+        return None
+    return usage, error
+
+
+def remember_slot_usage(
+    store: dict, key: str, usage: dict | None, error: str, now: float
+) -> None:
+    cache = store.setdefault("usage_cache", {})
+    previous = cache.get(key, {})
+    known_at = now if usage is not None else None
+    # Um 429 nao apaga uma leitura valida que acabou de confirmar a conta ativa
+    # como esgotada. Ela continua utilizavel para a decisao por poucos minutos;
+    # sem historico, usage continua None e a conta ativa e mantida.
+    if usage is None and error:
+        previous_usage = previous.get("usage")
+        previous_known_at = previous.get("known_at", previous.get("at"))
+        try:
+            previous_age = now - float(previous_known_at)
+        except (TypeError, ValueError):
+            previous_age = USAGE_STALE_DECISION_TTL_S
+        if isinstance(previous_usage, dict) and 0 <= previous_age < USAGE_STALE_DECISION_TTL_S:
+            usage = previous_usage
+            known_at = previous_known_at
+    cache[key] = {
+        "at": now,
+        "usage": usage,
+        "error": error,
+        "known_at": known_at,
+    }
 
 
 def live_identity() -> tuple[dict, dict, str]:
@@ -516,6 +662,18 @@ def pick_target(
     return ranked[0][0]
 
 
+def hold_active_on_unknown_usage(
+    store: dict,
+    usage_map: dict[str, dict | None],
+    active: str | None,
+) -> bool:
+    """Erro ao medir usage nao prova que a conta ativa deixou de funcionar."""
+    if not active or usage_map.get(active) is not None:
+        return False
+    slot = store["slots"].get(active, {})
+    return not slot.get("dead")
+
+
 # --------------------------------------------------------------------------
 # comandos
 
@@ -547,13 +705,27 @@ def fmt_delay(secs: float) -> str:
 
 
 def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | None]:
-    """Cota de cada slot. Sob store_lock: renova tokens e grava o store."""
+    """Cota de cada slot, com cache compartilhado entre processos."""
     with store_lock():
+        # Quem esperou o lock pode ter carregado o store antes de outro hook
+        # atualizar o cache. Rele a fonte sob o lock para enxergar esse resultado.
+        fresh = load_store()
+        store.clear()
+        store.update(fresh)
         active = active_slot(store)
         sync_active_slot(store, active)
         usage_map, err_map = {}, {}
+        now = time.time()
+        changed = False
         for key, slot in store["slots"].items():
-            usage_map[key], err_map[key] = slot_usage(key, slot, key == active, store)
+            cached = cached_slot_usage(store, key, now)
+            if cached is None:
+                cached = slot_usage(key, slot, key == active, store)
+                remember_slot_usage(store, key, *cached, now)
+                changed = True
+            usage_map[key], err_map[key] = cached
+        if changed:
+            write_json(STORE, store)
     return usage_map, err_map, active
 
 
@@ -631,6 +803,7 @@ def _add(args: argparse.Namespace) -> int:
         slot = store["slots"][existing]
         slot.update(oauth=oauth, account=account, org_uuid=org, email=email)
         slot.pop("dead", None)
+        store.get("usage_cache", {}).pop(existing, None)
         write_json(STORE, store)
         print(f"slot {existing} atualizado: {email}")
         return 0
@@ -680,12 +853,19 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"{fmt_window(usage, '7d')} {fmt_reset(usage, '7d'):>7}{tag}"
         )
     target = pick_target(usage_map, args.threshold, args.strategy)
+    hold_active = hold_active_on_unknown_usage(store, usage_map, active)
     if target and target != active:
         print(f"\n-> {args.strategy} recomenda o slot {target}")
-        print("-> troca pendente; 'status' nao acorda o monitor")
+        if hold_active:
+            print(
+                f"-> monitor mantem o slot {active}: erro da conta ativa nao "
+                "confirma falta de cota"
+            )
+        else:
+            print("-> troca pendente; monitor ou hook aplica automaticamente")
     elif not target:
         print("\n-> todas travadas em 100%, nada para onde trocar")
-    if not target or target == active:
+    if not target or target == active or hold_active:
         print(f"-> proxima checagem em ~{fmt_delay(next_wake(usage_map, err_map, active))}")
     return 0
 
@@ -702,11 +882,20 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def do_switch(store: dict, key: str) -> None:
-    slot = store["slots"][key]
     with store_lock():
+        # A coleta soltou este lock antes de chegar aqui. Releia o store para
+        # nao sobrescrever cache ou refresh token que outro hook gravou nesse
+        # intervalo.
+        fresh = load_store()
+        slot = fresh["slots"].get(key)
+        if slot is None:
+            raise ValueError(f"Slot {key} nao existe mais.")
         apply_slot(slot)
-        store["last_switch"] = time.time()
-        write_json(STORE, store)
+        fresh["last_switch"] = time.time()
+        fresh.get("usage_cache", {}).pop(key, None)
+        write_json(STORE, fresh)
+        store.clear()
+        store.update(fresh)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
     auto_event(f"troca para o slot {key}")
 
@@ -736,16 +925,10 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
     target = pick_target(usage_map, args.threshold, args.strategy)
     delay = float(args.poll) if args.poll else next_wake(usage_map, err_map, active)
     stamp = time.strftime("%H:%M:%S")
-    # Nao abandonar a conta ativa so porque a cota dela ficou ilegivel. Nao
-    # conseguir LER a cota nao diz nada sobre a conta funcionar, e trocar nesse
-    # estado e decidir por ignorancia: foi assim que uma falha de refresh no
-    # slot ativo jogou a sessao numa conta com 99% do semanal gasto. Token
-    # morto e diferente, ai sabemos que quebrou e sair e o certo.
-    if (
-        active
-        and usage_map.get(active) is None
-        and not store["slots"].get(active, {}).get("dead")
-    ):
+    # HTTP 429 aqui veio da medicao de usage, nao de uma chamada ao modelo.
+    # Nenhum erro de leitura prova falta de cota; token morto e o unico caso
+    # acionavel porque foi classificado separadamente no refresh.
+    if hold_active_on_unknown_usage(store, usage_map, active):
         print(
             f"[{stamp}] cota do slot {active} ilegivel ({err_map.get(active)}), "
             "mantendo a conta atual"

@@ -188,6 +188,193 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
     assert "proxima checagem" not in texto
 
 
+def test_status_nao_confunde_erro_de_usage_com_conta_esgotada():
+    store = {
+        "slots": {
+            "2": {"email": "b@x.com"},
+            "3": {"email": "c@x.com"},
+        }
+    }
+    cotas = {"2": usage(88, 38, 100), "3": None}
+    args = SimpleNamespace(threshold=85, strategy="consume-first")
+
+    for error in ("HTTP 429", "TimeoutError"):
+        saida = StringIO()
+        with (
+            mock.patch.object(ccx, "load_store", return_value=store),
+            mock.patch.object(
+                ccx, "collect", return_value=(cotas, {"2": "", "3": error}, "3")
+            ),
+            redirect_stdout(saida),
+        ):
+            assert ccx.cmd_status(args) == 0
+        texto = saida.getvalue()
+        assert "recomenda o slot 2" in texto
+        assert "troca pendente" not in texto
+        assert "monitor mantem o slot 3" in texto
+
+
+def test_check_once_mantem_ativa_em_qualquer_erro_de_usage():
+    store = {
+        "slots": {
+            "2": {"email": "b@x.com"},
+            "3": {"email": "c@x.com"},
+        },
+        "last_switch": 0,
+    }
+    cotas = {"2": usage(88, 38, 100), "3": None}
+    args = SimpleNamespace(
+        threshold=85, strategy="consume-first", poll=60, cooldown=300
+    )
+
+    for error in ("HTTP 429", "TimeoutError"):
+        with (
+            mock.patch.object(ccx, "load_store", return_value=store),
+            mock.patch.object(
+                ccx, "collect", return_value=(cotas, {"2": "", "3": error}, "3")
+            ),
+            mock.patch.object(ccx, "do_switch") as switch,
+        ):
+            assert ccx.check_once(args) == (2, 60.0)
+        switch.assert_not_called()
+
+
+def test_check_once_troca_com_429_se_a_ativa_ja_foi_confirmada_esgotada():
+    store = {
+        "slots": {
+            "2": {"email": "b@x.com"},
+            "3": {"email": "c@x.com"},
+        },
+        "last_switch": 0,
+    }
+    cotas = {"2": usage(20, 10, 100), "3": usage(100, 20, 100)}
+    args = SimpleNamespace(
+        threshold=85, strategy="consume-first", poll=60, cooldown=300
+    )
+
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(
+            ccx, "collect", return_value=(cotas, {"2": "", "3": "HTTP 429"}, "3")
+        ),
+        mock.patch.object(ccx, "do_switch") as switch,
+    ):
+        assert ccx.check_once(args) == (0, 60.0)
+    switch.assert_called_once_with(store, "2")
+
+
+def test_usage_cache_aplica_ttl_maior_depois_de_erro():
+    store = {"usage_cache": {}}
+    conhecida = usage(20, 30, 100)
+
+    ccx.remember_slot_usage(store, "1", conhecida, "", 100.0)
+    assert ccx.cached_slot_usage(store, "1", 129.9) == (conhecida, "")
+    assert ccx.cached_slot_usage(store, "1", 130.0) is None
+
+    ccx.remember_slot_usage(store, "1", None, "HTTP 429", 100.0)
+    assert ccx.cached_slot_usage(store, "1", 219.9) == (conhecida, "HTTP 429")
+    assert ccx.cached_slot_usage(store, "1", 220.0) is None
+    assert store["usage_cache"]["1"]["known_at"] == 100.0
+
+
+def test_collect_rele_cache_sob_lock_e_nao_repete_usage():
+    conhecida = usage(20, 30, 100)
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 100.0, "usage": conhecida, "error": ""},
+        },
+    }
+    stale = {"slots": {"1": {"email": "a@x.com"}}, "last_switch": 0}
+
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=120.0),
+        mock.patch.object(ccx, "slot_usage") as fetch,
+    ):
+        usage_map, err_map, active = ccx.collect(stale)
+
+    assert (usage_map, err_map, active) == ({"1": conhecida}, {"1": ""}, "1")
+    fetch.assert_not_called()
+    assert stale["usage_cache"] == fresh["usage_cache"]
+
+
+def test_collect_atualiza_cache_vencido():
+    antiga = usage(10, 20, 100)
+    nova = usage(30, 40, 100)
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {"1": {"at": 0.0, "usage": antiga, "error": ""}},
+    }
+    store = {}
+
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=500.0),
+        mock.patch.object(ccx, "slot_usage", return_value=(nova, "")) as fetch,
+        mock.patch.object(ccx, "write_json") as write,
+    ):
+        assert ccx.collect(store) == ({"1": nova}, {"1": ""}, "1")
+
+    fetch.assert_called_once()
+    write.assert_called_once_with(ccx.STORE, store)
+    assert store["usage_cache"]["1"] == {
+        "at": 500.0,
+        "usage": nova,
+        "error": "",
+        "known_at": 500.0,
+    }
+
+
+def test_sync_rotacao_de_token_nao_descarta_usage_recente():
+    conhecida = usage(20, 30, 100)
+    store = {
+        "slots": {"1": {"email": "a@x.com", "oauth": {"accessToken": "velho"}}},
+        "usage_cache": {"1": {"at": 1.0, "usage": conhecida, "error": ""}},
+    }
+    with (
+        mock.patch.object(
+            ccx, "live_identity", return_value=({"accessToken": "novo"}, {}, "")
+        ),
+        mock.patch.object(ccx, "write_json"),
+    ):
+        ccx.sync_active_slot(store, "1")
+
+    assert store["slots"]["1"]["oauth"]["accessToken"] == "novo"
+    assert store["usage_cache"]["1"]["usage"] == conhecida
+
+
+def test_do_switch_rele_store_e_preserva_refresh_e_cache_concorrentes():
+    stale = {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
+    fresh = {
+        "slots": {"1": {"email": "novo", "oauth": {"refreshToken": "novo"}}},
+        "last_switch": 0,
+        "usage_cache": {"2": {"at": 1.0, "usage": usage(2, 3, 100), "error": ""}},
+    }
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "apply_slot") as apply,
+        mock.patch.object(ccx, "write_json") as write,
+        mock.patch.object(ccx, "auto_event"),
+        mock.patch.object(ccx.time, "time", return_value=500.0),
+    ):
+        ccx.do_switch(stale, "1")
+
+    apply.assert_called_once_with(fresh["slots"]["1"])
+    write.assert_called_once_with(ccx.STORE, fresh)
+    assert stale == fresh
+    assert stale["usage_cache"]["2"]["usage"]["5h"]["pct"] == 2
+
+
 def test_stats_consolida_claude_e_codex():
     saida = StringIO()
     args = SimpleNamespace(threshold=85, strategy="consume-first")
@@ -364,7 +551,49 @@ def test_lock_libera():
         lock = Path(tmp) / "alvo.lock"
         with ccx.claude_lock(target):
             assert lock.is_dir()
+            assert not (lock / ccx.LOCK_OWNER_FILE).exists()
         assert not lock.exists(), "lock ficou pendurado"
+
+
+def test_lock_timeout_zero_recupera_stale_e_recusa_lock_vivo():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "auto"
+        lock = Path(tmp) / "auto.lock"
+
+        lock.mkdir()
+        os.utime(lock, (0, 0))
+        with mock.patch.object(ccx.time, "monotonic", side_effect=[100.0, 100.001]):
+            with ccx.claude_lock(target, timeout=0):
+                assert lock.is_dir()
+        assert not lock.exists(), "lock stale deveria ser tomado e liberado"
+
+        lock.mkdir()
+        try:
+            with ccx.claude_lock(target, timeout=0):
+                raise AssertionError("lock vivo nao pode ser tomado")
+        except TimeoutError:
+            pass
+        finally:
+            lock.rmdir()
+
+
+def test_lock_timeout_zero_nao_toma_lock_stale_de_processo_vivo():
+    with tempfile.TemporaryDirectory() as tmp:
+        old_store = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        target = Path(tmp) / "auto"
+        lock = Path(tmp) / "auto.lock"
+        lock.mkdir()
+        ccx.write_json(lock / ccx.LOCK_OWNER_FILE, {"pid": os.getpid(), "id": "vivo"})
+        os.utime(lock, (0, 0))
+        try:
+            with ccx.claude_lock(target, timeout=0):
+                raise AssertionError("lock de processo vivo nao pode ser tomado")
+        except TimeoutError:
+            pass
+        finally:
+            ccx.discard_lock(lock, "vivo")
+            ccx.STORE = old_store
 
 
 def test_auto_sobrevive_a_erro_inesperado():
@@ -400,6 +629,21 @@ def test_watchdog_relanca_monitor_morto_sem_consultar_usage():
     ):
         assert ccx_watchdog.main() == 0
     start.assert_not_called()
+
+
+def test_watchdog_nao_duplica_monitor_suspenso_com_pid_vivo():
+    with tempfile.TemporaryDirectory() as tmp:
+        old_store = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        lock = ccx.STORE.parent / "auto.lock"
+        lock.mkdir()
+        ccx.write_json(lock / ccx.LOCK_OWNER_FILE, {"pid": os.getpid(), "id": "vivo"})
+        os.utime(lock, (0, 0))
+        try:
+            assert ccx_watchdog.monitor_alive()
+        finally:
+            ccx.discard_lock(lock, "vivo")
+            ccx.STORE = old_store
 
 
 def test_token_expirado():

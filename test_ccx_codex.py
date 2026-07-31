@@ -7,6 +7,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import ccx
 import ccx_codex
@@ -217,6 +218,143 @@ def test_column_labels_usa_duracao_real_da_janela():
         },
     }
     assert ccx_codex._column_labels(usage_map2) == ("5h", "7d")
+
+
+def test_check_once_nao_confunde_429_de_usage_com_conta_esgotada():
+    import unittest.mock as mock
+
+    store = {
+        "slots": {
+            "1": {"email": "a@x.com"},
+            "2": {"email": "b@x.com"},
+        },
+        "last_switch": 0,
+    }
+    conhecida = {
+        "5h": {"pct": 50.0, "resets_at": None},
+        "7d": {"pct": 40.0, "resets_at": None},
+    }
+    cotas = {"1": None, "2": conhecida}
+    args = SimpleNamespace(
+        threshold=85, strategy="consume-first", poll=60, cooldown=300
+    )
+
+    for error in ("HTTP 429", "TimeoutError"):
+        with (
+            mock.patch.object(ccx_codex, "load_store", return_value=store),
+            mock.patch.object(
+                ccx_codex,
+                "collect",
+                return_value=(cotas, {"1": error, "2": ""}, "1"),
+            ),
+            mock.patch.object(ccx_codex, "do_switch") as switch,
+        ):
+            assert ccx_codex.check_once(args) == (2, 60.0)
+        switch.assert_not_called()
+
+
+def test_check_once_codex_troca_com_429_apos_confirmacao_recente():
+    import unittest.mock as mock
+
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": 0,
+    }
+    cotas = {
+        "1": {"5h": {"pct": 100.0, "resets_at": None}, "7d": {"pct": 20.0, "resets_at": None}},
+        "2": {"5h": {"pct": 20.0, "resets_at": None}, "7d": {"pct": 10.0, "resets_at": None}},
+    }
+    args = SimpleNamespace(
+        threshold=85, strategy="consume-first", poll=60, cooldown=300
+    )
+
+    with (
+        mock.patch.object(ccx_codex, "load_store", return_value=store),
+        mock.patch.object(
+            ccx_codex,
+            "collect",
+            return_value=(cotas, {"1": "HTTP 429", "2": ""}, "1"),
+        ),
+        mock.patch.object(ccx_codex, "do_switch") as switch,
+    ):
+        assert ccx_codex.check_once(args) == (0, 60.0)
+    switch.assert_called_once_with(store, "2")
+
+
+def test_collect_codex_reusa_o_cache_compartilhado():
+    import unittest.mock as mock
+    from contextlib import nullcontext
+
+    conhecida = {
+        "5h": {"pct": 20.0, "resets_at": None},
+        "7d": {"pct": 30.0, "resets_at": None},
+    }
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 100.0, "usage": conhecida, "error": ""},
+        },
+    }
+
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "active_slot", return_value="1"),
+        mock.patch.object(ccx_codex, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=120.0),
+        mock.patch.object(ccx_codex, "slot_usage") as fetch,
+    ):
+        assert ccx_codex.collect({}) == ({"1": conhecida}, {"1": ""}, "1")
+
+    fetch.assert_not_called()
+
+
+def test_sync_codex_nao_descarta_usage_ao_rotacionar_token():
+    import unittest.mock as mock
+
+    conhecida = {"5h": {"pct": 20.0, "resets_at": None}}
+    store = {
+        "slots": {"1": {"email": "a@x.com", "tokens": {"access_token": "velho"}}},
+        "usage_cache": {"1": {"at": 1.0, "usage": conhecida, "error": ""}},
+    }
+    with (
+        mock.patch.object(
+            ccx_codex,
+            "live_identity",
+            return_value=({"access_token": "novo"}, {"email": "a@x.com"}),
+        ),
+        mock.patch.object(ccx, "write_json"),
+    ):
+        ccx_codex.sync_active_slot(store, "1")
+
+    assert store["slots"]["1"]["tokens"]["access_token"] == "novo"
+    assert store["usage_cache"]["1"]["usage"] == conhecida
+
+
+def test_do_switch_codex_rele_store_e_preserva_estado_concorrente():
+    import unittest.mock as mock
+    from contextlib import nullcontext
+
+    stale = {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
+    fresh = {
+        "slots": {"1": {"email": "novo", "tokens": {"refresh_token": "novo"}}},
+        "last_switch": 0,
+        "usage_cache": {"2": {"at": 1.0, "usage": {"5h": {"pct": 3}}, "error": ""}},
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "apply_slot") as apply,
+        mock.patch.object(ccx, "write_json") as write,
+        mock.patch.object(ccx.time, "time", return_value=500.0),
+    ):
+        ccx_codex.do_switch(stale, "1")
+
+    apply.assert_called_once_with(fresh["slots"]["1"])
+    write.assert_called_once_with(ccx_codex.STORE, fresh)
+    assert stale == fresh
+    assert stale["usage_cache"]["2"]["usage"]["5h"]["pct"] == 3
 
 
 def test_window_label_arredonda_horas_e_dias():

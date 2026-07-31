@@ -21,6 +21,17 @@ locais. Pontos que importam para quem for auditar ou confiar no codigo:
   modulo Claude, que segura o lock de diretorio documentado no proprio
   codigo do Claude Code). Ver a secao "Modulo Codex" do `README.md` para o
   detalhe dessa janela de corrida conhecida.
+- **Hot-swap global nao isola sessoes persistentes.** O Codex pode manter a
+  autenticacao em memoria depois de ler `auth.json`; trocar esse arquivo nao
+  migra com seguranca um processo ja aberto. Para agentes simultaneos, use
+  perfis separados por processo (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`) ou uma
+  camada de proxy com afinidade de sessao.
+- **Leituras de cota sao amortizadas entre processos.** `status`, hooks e
+  monitores compartilham um cache local curto (30 s para sucesso e 120 s para
+  erro). Isso reduz rajadas contra os endpoints oficiais sem atrasar o poll do
+  monitor. Um `HTTP 429` sem historico nao e interpretado como conta esgotada;
+  uma leitura recente que ja confirmou o esgotamento continua valida por 5 min
+  apenas para decidir uma troca segura.
 
 ## Reportando uma vulnerabilidade
 

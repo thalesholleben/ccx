@@ -19,7 +19,15 @@ import ccx
 def monitor_alive() -> bool:
     lock = ccx.STORE.parent / "auto.lock"
     try:
-        return lock.is_dir() and time.time() - lock.stat().st_mtime < ccx.LOCK_STALE_S
+        if not lock.is_dir():
+            return False
+        # Um processo suspenso pode deixar o heartbeat velho por alguns
+        # segundos, mas seu PID ainda existe. Nao crie um segundo monitor nesse
+        # caso; o lock com dono morto e retomado pelo claude_lock imediatamente.
+        pid = ccx.lock_owner_pid(lock)
+        if pid is not None:
+            return ccx.process_alive(pid)
+        return time.time() - lock.stat().st_mtime < ccx.LOCK_STALE_S
     except FileNotFoundError:
         return False
 
