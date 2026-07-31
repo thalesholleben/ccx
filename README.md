@@ -105,10 +105,11 @@ cd C:\caminho\para\ccx
 .\install-ccx-monitor.ps1
 ```
 
-Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. Ela
-continua funcionando na bateria e, se o processo terminar com falha, o Agendador do
-Windows o reinicia após um minuto. Os eventos de início, erro inesperado,
-encerramento manual e troca ficam em
+Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. A
+tarefa executa um watchdog a cada minuto: ele só lê o heartbeat local do monitor
+(não consulta usage) e relança o `ccx auto` em processo destacado se ele morrer. Ela
+continua funcionando na bateria. Os eventos de início, erro inesperado,
+encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
 
 O `ccx auto` do VS Code fica como fallback manual: não inicia mais ao abrir a pasta,
@@ -443,12 +444,13 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 19 testes cobrindo:
+Sem framework, só `assert`. 20 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
 - execução silenciosa da checagem usada pelo hook `Stop`
 - continuidade do monitor após erro inesperado
+- watchdog relançando somente monitor sem heartbeat
 - saída do `status` sem intervalo enganoso quando há troca pendente
 - preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
 - identidade sobrevivendo à rotação de token feita pelo Claude Code

@@ -12,10 +12,13 @@ if ($Uninstall) {
 }
 
 $python = (Get-Command python -ErrorAction Stop).Source
-$ccx = Join-Path $PSScriptRoot 'ccx.py'
+$watchdog = Join-Path $PSScriptRoot 'ccx_watchdog.py'
 $user = "$env:USERDOMAIN\$env:USERNAME"
-$action = New-ScheduledTaskAction -Execute $python -Argument "`"$ccx`" auto" -WorkingDirectory $PSScriptRoot
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$action = New-ScheduledTaskAction -Execute $python -Argument "`"$watchdog`"" -WorkingDirectory $PSScriptRoot
+$triggers = @(
+  (New-ScheduledTaskTrigger -AtLogOn -User $user),
+  (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650))
+)
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet `
   -RestartCount 999 `
@@ -27,7 +30,7 @@ $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable
 
 Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action `
-  -Trigger $trigger -Principal $principal -Settings $settings `
-  -Description 'Monitora e alterna automaticamente as contas do Claude Code.' -Force | Out-Null
+  -Trigger $triggers -Principal $principal -Settings $settings `
+  -Description 'Mantem o monitor de contas Claude Code vivo e o relanca apos falha.' -Force | Out-Null
 Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath
-Write-Output 'Monitor permanente do CCX instalado e iniciado. Logs: ~/.ccx/auto.log'
+Write-Output 'Watchdog permanente do CCX instalado e iniciado. Logs: ~/.ccx/auto.log'

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import ccx
 import ccx_codex
+import ccx_watchdog
 
 
 def usage(pct5, pct7, weekly_in_h, h5_in_h=1):
@@ -383,6 +384,22 @@ def test_auto_sobrevive_a_erro_inesperado():
         assert ccx.cmd_auto(args) == 0
     assert "erro no monitor: ValueError" in saida.getvalue()
     assert any("erro no monitor: ValueError" in call.args[0] for call in event.call_args_list)
+
+
+def test_watchdog_relanca_monitor_morto_sem_consultar_usage():
+    with (
+        mock.patch.object(ccx_watchdog, "monitor_alive", return_value=False),
+        mock.patch.object(ccx_watchdog, "start_monitor") as start,
+    ):
+        assert ccx_watchdog.main() == 0
+    start.assert_called_once()
+
+    with (
+        mock.patch.object(ccx_watchdog, "monitor_alive", return_value=True),
+        mock.patch.object(ccx_watchdog, "start_monitor") as start,
+    ):
+        assert ccx_watchdog.main() == 0
+    start.assert_not_called()
 
 
 def test_token_expirado():
