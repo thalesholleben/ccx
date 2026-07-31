@@ -465,7 +465,10 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "confirma falta de cota"
             )
         else:
-            print("-> troca pendente; monitor aplica automaticamente")
+            print(
+                "-> troca pendente; Codex nao tem monitor permanente. Nao "
+                "troque auth.json com extensao/app-server aberto"
+            )
     elif not target:
         print("\n-> todas travadas em 100%, nada para onde trocar")
     if not target or target == active or hold_active:

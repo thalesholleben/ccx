@@ -179,6 +179,7 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
         mock.patch.object(
             ccx, "collect", return_value=(cotas, {"1": "", "3": ""}, "3")
         ),
+        mock.patch.object(ccx, "auto_monitor_alive", return_value=True),
         redirect_stdout(saida),
     ):
         assert ccx.cmd_status(SimpleNamespace(threshold=85, strategy="consume-first")) == 0
@@ -186,6 +187,26 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
     assert "recomenda o slot 1" in texto
     assert "troca pendente" in texto
     assert "proxima checagem" not in texto
+
+
+def test_status_avisa_monitor_offline_em_vez_de_prometer_troca():
+    store = {"slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}}}
+    cotas = {"1": usage(5, 5, 100), "2": usage(99, 50, 100)}
+    saida = StringIO()
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(
+            ccx, "collect", return_value=(cotas, {"1": "", "2": ""}, "2")
+        ),
+        mock.patch.object(ccx, "auto_monitor_alive", return_value=False),
+        redirect_stdout(saida),
+    ):
+        assert ccx.cmd_status(SimpleNamespace(threshold=85, strategy="consume-first")) == 0
+    texto = saida.getvalue()
+    assert "recomenda o slot 1" in texto
+    assert "monitor offline" in texto
+    assert "\\CCX\\Claude Monitor" in texto
+    assert "aplica automaticamente" not in texto
 
 
 def test_status_nao_confunde_erro_de_usage_com_conta_esgotada():
@@ -644,6 +665,14 @@ def test_watchdog_nao_duplica_monitor_suspenso_com_pid_vivo():
         finally:
             ccx.discard_lock(lock, "vivo")
             ccx.STORE = old_store
+
+
+def test_instalador_usa_pythonw_para_nao_piscar_console():
+    installer = Path(__file__).with_name("install-ccx-monitor.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert "$pythonw =" in installer
+    assert "-Execute $pythonw" in installer
 
 
 def test_token_expirado():

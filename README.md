@@ -126,6 +126,10 @@ morto é retomado sem esperar o timeout, enquanto um processo apenas suspenso n�
 ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
 encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
+O watchdog usa `pythonw.exe`, portanto não abre uma janela de terminal a cada minuto.
+Se a tarefa for desativada manualmente no Agendador, ela continua desativada após
+reiniciar o Windows. O `status` avisa que o monitor está offline; rode o instalador
+de novo para habilitá-la.
 
 O `ccx auto` do VS Code fica como fallback manual: não inicia mais ao abrir a pasta,
 evitando que uma instância efêmera ocupe o lock antes do monitor permanente. Para
@@ -475,7 +479,7 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 31 testes cobrindo:
+Sem framework, só `assert`. 33 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
@@ -483,6 +487,7 @@ Sem framework, só `assert`. 31 testes cobrindo:
 - continuidade do monitor após erro inesperado
 - watchdog relançando somente monitor morto, sem duplicar processo suspenso
 - retomada com `timeout=0` removendo lock morto sem tomar lock vivo
+- aviso explícito quando o monitor está offline e instalador sem janela piscando
 - cache/debounce compartilhado, inclusive releitura depois de esperar o lock
 - `HTTP 429` de usage mantendo a ativa sem histórico e trocando quando há
   confirmação recente de esgotamento

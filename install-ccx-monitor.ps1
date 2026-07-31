@@ -12,9 +12,13 @@ if ($Uninstall) {
 }
 
 $python = (Get-Command python -ErrorAction Stop).Source
+$pythonw = Join-Path (Split-Path -Parent $python) 'pythonw.exe'
+if (-not (Test-Path -LiteralPath $pythonw)) {
+  throw "pythonw.exe nao encontrado ao lado de $python"
+}
 $watchdog = Join-Path $PSScriptRoot 'ccx_watchdog.py'
 $user = "$env:USERDOMAIN\$env:USERNAME"
-$action = New-ScheduledTaskAction -Execute $python -Argument "`"$watchdog`"" -WorkingDirectory $PSScriptRoot
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$watchdog`"" -WorkingDirectory $PSScriptRoot
 $triggers = @(
   (New-ScheduledTaskTrigger -AtLogOn -User $user),
   (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650))
@@ -32,5 +36,6 @@ $settings = New-ScheduledTaskSettingsSet `
 Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action `
   -Trigger $triggers -Principal $principal -Settings $settings `
   -Description 'Mantem o monitor de contas Claude Code vivo e o relanca apos falha.' -Force | Out-Null
+Enable-ScheduledTask -TaskName $taskName -TaskPath $taskPath | Out-Null
 Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath
-Write-Output 'Watchdog permanente do CCX instalado e iniciado. Logs: ~/.ccx/auto.log'
+Write-Output 'Watchdog permanente do CCX habilitado e iniciado. Logs: ~/.ccx/auto.log'

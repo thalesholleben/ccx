@@ -191,6 +191,20 @@ def process_alive(pid: int) -> bool:
     return True
 
 
+def auto_monitor_alive() -> bool:
+    """Heartbeat do monitor permanente, sem consultar usage."""
+    lock_dir = STORE.parent / "auto.lock"
+    try:
+        if not lock_dir.is_dir():
+            return False
+        pid = lock_owner_pid(lock_dir)
+        if pid is not None:
+            return process_alive(pid)
+        return time.time() - lock_dir.stat().st_mtime < LOCK_STALE_S
+    except FileNotFoundError:
+        return False
+
+
 def _rmdir_lock(lock_dir: Path) -> bool:
     try:
         os.rmdir(lock_dir)
@@ -861,8 +875,13 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"-> monitor mantem o slot {active}: erro da conta ativa nao "
                 "confirma falta de cota"
             )
-        else:
+        elif auto_monitor_alive():
             print("-> troca pendente; monitor ou hook aplica automaticamente")
+        else:
+            print(
+                "-> monitor offline; a troca nao sera automatica. Habilite a "
+                "tarefa '\\CCX\\Claude Monitor' no Agendador do Windows"
+            )
     elif not target:
         print("\n-> todas travadas em 100%, nada para onde trocar")
     if not target or target == active or hold_active:

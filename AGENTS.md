@@ -18,7 +18,7 @@ CLI ja usam.
 ## Comandos de validacao
 
 ```bash
-python test_ccx.py         # 31 testes, engine de decisao + IO do modulo Claude
+python test_ccx.py         # 33 testes, engine de decisao + IO do modulo Claude
 python test_ccx_codex.py   # 17 testes, especifico do modulo Codex
 ```
 
