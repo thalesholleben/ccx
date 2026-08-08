@@ -18,8 +18,8 @@ CLI ja usam.
 ## Comandos de validacao
 
 ```bash
-python test_ccx.py         # 33 testes, engine de decisao + IO do modulo Claude
-python test_ccx_codex.py   # 17 testes, especifico do modulo Codex
+python test_ccx.py         # 35 testes, engine de decisao + IO do modulo Claude
+python test_ccx_codex.py   # 18 testes, especifico do modulo Codex
 ```
 
 Sem framework de teste, so `assert` e um runner minimo no final de cada
@@ -51,6 +51,14 @@ arquivo. Rodar os dois antes de qualquer PR.
 - `do_switch` deve reler o store depois de adquirir o lock. A coleta solta o
   lock antes da decisao, e gravar o snapshot antigo pode ressuscitar refresh
   token ou apagar cache que outro hook acabou de salvar.
+- `pinned_slot` e uma trava de operador, nao uma preferencia. Quando existe,
+  `check_once` sai antes de qualquer coleta: fixar uma conta nao pode gerar
+  trafego de usage. E o `do_switch(..., only_if_pinned=True)` revalida a
+  fixacao ja sob o lock, senao um `--pin off` concorrente seria desfeito por
+  uma troca decidida antes dele.
+- `pinned_slot` invalido (slot inexistente ou tipo errado) levanta erro em vez
+  de virar `None`. Cair em rotacao silenciosa e pior do que parar: o operador
+  fixou justamente para a conta nao mudar.
 - A troca do arquivo global de autenticacao serve para uso sequencial. Um
   processo persistente do Codex pode manter a identidade em memoria e nao
   migrar de conta. Nao documentar esse hot-swap como isolamento seguro entre

@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import tempfile
+import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -279,6 +280,23 @@ def test_check_once_codex_troca_com_429_apos_confirmacao_recente():
     ):
         assert ccx_codex.check_once(args) == (0, 60.0)
     switch.assert_called_once_with(store, "2")
+
+
+def test_check_once_codex_respeita_slot_fixado_sem_consultar_cota():
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "pinned_slot": "2",
+    }
+    args = SimpleNamespace(threshold=80, strategy="consume-first", poll=0, cooldown=300)
+    with (
+        mock.patch.object(ccx_codex, "load_store", return_value=store),
+        mock.patch.object(ccx_codex, "active_slot", return_value="1"),
+        mock.patch.object(ccx_codex, "collect") as collect,
+        mock.patch.object(ccx_codex, "do_switch", return_value=True) as switch,
+    ):
+        assert ccx_codex.check_once(args) == (0, ccx.PINNED_CHECK_S)
+    collect.assert_not_called()
+    switch.assert_called_once_with(store, "2", only_if_pinned=True)
 
 
 def test_collect_codex_reusa_o_cache_compartilhado():

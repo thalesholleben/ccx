@@ -243,6 +243,15 @@ def load_store() -> dict:
     return s
 
 
+def pinned_slot(store: dict) -> str | None:
+    key = store.get("pinned_slot")
+    if key is None:
+        return None
+    if not isinstance(key, str) or key not in store["slots"]:
+        raise ValueError(f"Slot fixado inválido: {key!r}.")
+    return key
+
+
 def live_identity() -> tuple[dict, dict]:
     """(tokens, identidade) da conta ativa no Codex CLI agora."""
     auth = ccx.read_json(auth_path())
@@ -455,6 +464,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"{ccx.fmt_window(usage, '5h')} {ccx.fmt_reset(usage, '5h'):>7} "
             f"{ccx.fmt_window(usage, '7d')} {ccx.fmt_reset(usage, '7d'):>7}{tag}"
         )
+    pinned = pinned_slot(store)
+    if pinned:
+        print(f"\n-> slot {pinned} fixado; use 'ccx_codex auto --pin off' para liberar a rotação")
+        return 0
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
     hold_active = ccx.hold_active_on_unknown_usage(store, usage_map, active)
     if target and target != active:
@@ -479,9 +492,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def do_switch(store: dict, key: str) -> None:
+def do_switch(store: dict, key: str, *, only_if_pinned: bool = False) -> bool:
     with store_lock():
         fresh = load_store()
+        if only_if_pinned and pinned_slot(fresh) != key:
+            return False
         slot = fresh["slots"].get(key)
         if slot is None:
             raise ValueError(f"Slot {key} nao existe mais.")
@@ -492,6 +507,7 @@ def do_switch(store: dict, key: str) -> None:
         store.clear()
         store.update(fresh)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
+    return True
 
 
 def cmd_switch(args: argparse.Namespace) -> int:
@@ -512,9 +528,35 @@ def cmd_switch(args: argparse.Namespace) -> int:
     return 0
 
 
+def configure_pin(pin: str) -> tuple[str | None, bool]:
+    with store_lock():
+        store = load_store()
+        if pin == "off":
+            changed = store.pop("pinned_slot", None) is not None
+            if changed:
+                ccx.write_json(STORE, store)
+            return None, False
+        if pin not in store["slots"]:
+            raise ValueError(f"Slot {pin} não existe. Tem: {', '.join(store['slots'])}")
+        store["pinned_slot"] = pin
+        ccx.write_json(STORE, store)
+        return pin, active_slot(store) == pin
+
+
 def check_once(args: argparse.Namespace) -> tuple[int, float]:
     """(codigo, segundos ate a proxima). 0 trocou, 2 nada a fazer, 3 sem alvo."""
     store = load_store()
+    pinned = pinned_slot(store)
+    if pinned:
+        active = active_slot(store)
+        stamp = time.strftime("%H:%M:%S")
+        if active == pinned:
+            print(f"[{stamp}] slot {pinned} fixado")
+            return 2, ccx.PINNED_CHECK_S
+        print(f"[{stamp}] fixação troca {active} -> {pinned}")
+        if do_switch(store, pinned, only_if_pinned=True):
+            return 0, ccx.PINNED_CHECK_S
+        return 2, ccx.PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
     delay = float(args.poll) if args.poll else ccx.next_wake(usage_map, err_map, active)
@@ -549,6 +591,15 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
+    pin = getattr(args, "pin", None)
+    if pin is not None:
+        pinned, already_active = configure_pin(pin)
+        if pinned:
+            print(f"slot {pinned} fixado")
+            if not already_active:
+                do_switch(load_store(), pinned, only_if_pinned=True)
+        else:
+            print("fixação removida; a rotação automática foi liberada")
     store = load_store()
     if len(store["slots"]) < 2:
         print("Precisa de pelo menos 2 contas. Use 'ccx_codex add' com cada uma logada.")
@@ -608,6 +659,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--cooldown", type=int, default=ccx.DEFAULT_COOLDOWN_S)
     p.add_argument("--once", action="store_true", help="uma checagem so, para cron")
+    p.add_argument("--pin", metavar="SLOT|off", help="fixa um slot ou libera a rotação")
     p.set_defaults(func=cmd_auto)
 
     args = ap.parse_args(argv)

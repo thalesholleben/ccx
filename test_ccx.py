@@ -284,6 +284,38 @@ def test_check_once_troca_com_429_se_a_ativa_ja_foi_confirmada_esgotada():
     switch.assert_called_once_with(store, "2")
 
 
+def test_check_once_respeita_slot_fixado_sem_consultar_cota():
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "pinned_slot": "2",
+    }
+    args = SimpleNamespace(threshold=80, strategy="consume-first", poll=0, cooldown=300)
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "collect") as collect,
+        mock.patch.object(ccx, "do_switch", return_value=True) as switch,
+    ):
+        assert ccx.check_once(args) == (0, ccx.PINNED_CHECK_S)
+    collect.assert_not_called()
+    switch.assert_called_once_with(store, "2", only_if_pinned=True)
+
+
+def test_configure_pin_persiste_e_pode_ser_removido():
+    with tempfile.TemporaryDirectory() as tmp:
+        original = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        ccx.write_json(ccx.STORE, {"slots": {"1": {}, "2": {}}})
+        try:
+            with mock.patch.object(ccx, "active_slot", return_value="1"):
+                assert ccx.configure_pin("2") == ("2", False)
+            assert ccx.load_store()["pinned_slot"] == "2"
+            assert ccx.configure_pin("off") == (None, False)
+            assert "pinned_slot" not in ccx.load_store()
+        finally:
+            ccx.STORE = original
+
+
 def test_usage_cache_aplica_ttl_maior_depois_de_erro():
     store = {"usage_cache": {}}
     conhecida = usage(20, 30, 100)

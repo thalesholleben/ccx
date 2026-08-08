@@ -88,7 +88,7 @@ Flags globais, válidas em qualquer subcomando:
 | Flag | Padrão | Efeito |
 | --- | --- | --- |
 | `--strategy consume-first\|best` | `consume-first` | Ver [Estratégias](#estratégias-de-troca) |
-| `--threshold N` | `85` | Percentual em que a conta deixa de ser candidata |
+| `--threshold N` | `80` | Percentual em que a conta deixa de ser candidata |
 
 Flags do `auto`:
 
@@ -97,6 +97,7 @@ Flags do `auto`:
 | `--cooldown N` | `300` | Segundos mínimos entre duas trocas, evita pingue-pongue |
 | `--poll N` | `0` | Força intervalo fixo em segundos. `0` usa o dinâmico |
 | `--once` | | Uma checagem só e sai, para uso em agendador |
+| `--pin N\|off` | | Fixa o slot `N` e suspende a rotação; `off` a libera novamente |
 
 Códigos de saída do `--once`: `0` trocou, `1` erro de configuração, `2` nada a
 fazer, `3` todas as contas travadas.
@@ -107,6 +108,17 @@ triplicando o tráfego e disputando a mesma troca.
 
 `status`, `hook` e `auto` também compartilham um cache em disco. Rodar `status`
 várias vezes seguidas não gera uma nova consulta por conta a cada execução.
+
+Para fixar uma conta, use `python ccx.py auto --pin 3`. A escolha é persistida,
+troca para o slot caso necessário e continua valendo após o watchdog reiniciar o
+monitor. Enquanto fixado, o monitor não consulta cota nem troca de conta. Para
+voltar à rotação, rode `python ccx.py auto --pin off`.
+
+A fixação vale para todo mundo que passa por `check_once`, então o hook `Stop`
+também para de trocar. O `switch` manual continua trocando na hora, mas é uma
+exceção temporária: na próxima checagem (no máximo ~60s) o monitor volta para o
+slot fixado. Para sair de vez do slot, use `--pin off` ou `--pin` no outro slot.
+O `status` e o `stats` avisam qual slot está fixado em vez de recomendar troca.
 
 ## Monitor contínuo no Windows
 
@@ -404,7 +416,8 @@ Se isso levantar `CERTIFICATE_VERIFY_FAILED`, o `certifi` deixa de ser opcional:
 
 ### Estado
 
-`~/.ccx/accounts.json`, com os slots, e `last_switch` para o cooldown. Por slot:
+`~/.ccx/accounts.json`, com os slots, `last_switch` para o cooldown e, quando
+existir, `pinned_slot` para suspender a rotação. Por slot:
 e-mail, bloco `claudeAiOauth`, `oauthAccount` e `org_uuid`.
 
 **Contém tokens OAuth. Nunca versione nem copie para fora da máquina.**
@@ -479,7 +492,7 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 33 testes cobrindo:
+Sem framework, só `assert`. 35 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
@@ -492,6 +505,8 @@ Sem framework, só `assert`. 33 testes cobrindo:
 - `HTTP 429` de usage mantendo a ativa sem histórico e trocando quando há
   confirmação recente de esgotamento
 - troca relendo o store para não perder refresh token/cache concorrente
+- slot fixado curto-circuitando a checagem, sem nenhuma consulta de cota
+- `--pin` persistindo a escolha e `--pin off` devolvendo a rotação
 - saída do `status` sem intervalo enganoso quando há troca pendente
 - preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
 - identidade sobrevivendo à rotação de token feita pelo Claude Code
@@ -534,6 +549,14 @@ Os comandos, flags e a leitura do `status`/`auto` são idênticos aos do
 `ccx.py` (ver [Comandos](#comandos) e [Estratégias de troca](#estratégias-de-troca));
 só troque `ccx.py` por `ccx_codex.py`. `ccx-codex-auto.cmd` faz o mesmo que
 `ccx-auto.cmd`, para o Codex.
+
+`--pin` também funciona igual (`python ccx_codex.py auto --pin 1`), e aqui ele
+resolve mais do que no módulo Claude: como o Codex não tem monitor permanente,
+o `auto --pin N` grava a fixação, reposiciona o `auth.json` no slot `N` e, sem
+nada rodando depois, a conta simplesmente fica onde foi deixada. Se você mantiver
+um `auto` do Codex aberto, ele passa a só confirmar a fixação, sem consultar cota.
+Continua valendo o aviso de não trocar o `auth.json` com extensão ou app-server
+abertos: eles já carregaram a identidade na memória.
 
 ### O que é diferente do módulo Claude
 
@@ -586,13 +609,13 @@ reposiciona a credencial que o Codex CLI oficial usa.
 python test_ccx_codex.py
 ```
 
-Mesmo estilo do `test_ccx.py`, com 17 testes cobrindo o que é específico do Codex: leitura
+Mesmo estilo do `test_ccx.py`, com 18 testes cobrindo o que é específico do Codex: leitura
 de claims do JWT, expiração via `exp`, classificação de erro de refresh
 (permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
 para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na
 troca, identidade sobrevivendo à rotação de refresh token, cache compartilhado,
-429 de usage com decisão baseada em histórico recente e troca sem sobrescrever
-estado concorrente.
+429 de usage com decisão baseada em histórico recente, slot fixado curto-circuitando
+a checagem sem consultar cota e troca sem sobrescrever estado concorrente.
 
 ## Licença
 
