@@ -516,11 +516,23 @@ dois lugares faz os dois rodarem o refresh e rotacionarem o token um do outro, q
 caminho para `refresh_token_reused`. Só conserve o perfil se aquela conta for viver
 isolada, e nesse caso não a cadastre também na rotação global.
 
-Detalhe correlato: um token revogado desse jeito **não é marcado `MORTO`
-automaticamente**. O `slot_usage` só tenta o refresh (o único caminho que detecta
-`dead`) quando o `exp` do access token já passou; enquanto ele estiver válido no papel,
-o slot fica em loop de `HTTP 401` no `status`. Até isso mudar, marque na mão ou rode
-`ccx_codex add` com a conta relogada.
+Desde 2026-08-14 o CCX detecta isso sozinho. Quando o usage devolve `401` **com
+`"code": "token_revoked"`** num slot inativo, ele gasta um refresh só para obter o
+veredito: se o refresh responder com código permanente, o slot vira `MORTO`, sai da
+rotação e passa a mostrar `token morto: relogue e rode 'ccx_codex add'`. Três guardas
+cercam esse caminho, e as três existem por um motivo concreto:
+
+- **`401` sem `token_revoked` não dispara nada.** O endpoint de usage devolve `401`
+  transitório: em 2026-08-14 as quatro contas deram `401` ao mesmo tempo e voltaram `200`
+  segundos depois. Tratar todo `401` como revogação faria o CCX rotacionar refresh token de
+  conta saudável, que é justamente o caminho para `refresh_token_reused`.
+- **A conta ativa nunca é renovada**, nem com `token_revoked`. Ela é do Codex CLI.
+- **No máximo um refresh por leitura.** Se o `exp` já tinha vencido e o refresh do topo da
+  função foi gasto, um `401` depois disso não gasta outro.
+
+Ao marcar um slot como morto, o CCX descarta junto a entrada dele no `usage_cache`. Sem
+isso, `remember_slot_usage` preservaria a última leitura boa por 300s e `pick_target`
+poderia eleger justamente a conta que acabou de morrer.
 
 ## Limitações
 
@@ -693,7 +705,7 @@ reposiciona a credencial que o Codex CLI oficial usa.
 python test_ccx_codex.py
 ```
 
-Mesmo estilo do `test_ccx.py`, com 19 testes cobrindo o que é específico do Codex: leitura
+Mesmo estilo do `test_ccx.py`, com 30 testes cobrindo o que é específico do Codex: leitura
 de claims do JWT, expiração via `exp`, classificação de erro de refresh
 (permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
 para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na

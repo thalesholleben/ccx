@@ -19,7 +19,7 @@ CLI ja usam.
 
 ```bash
 python test_ccx.py         # 42 testes, engine de decisao + IO do modulo Claude
-python test_ccx_codex.py   # 19 testes, especifico do modulo Codex
+python test_ccx_codex.py   # 30 testes, especifico do modulo Codex
 python test_ccx_profile.py # launcher opt-in de perfis isolados
 ```
 

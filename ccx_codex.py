@@ -67,6 +67,13 @@ OAUTH_SCOPE = "openid profile email"
 
 STORE = Path.home() / ".ccx" / "codex_accounts.json"
 REFRESH_SKEW_S = 300  # 5min, mesma folga do modulo Claude
+DEAD_SLOT_MSG = "token morto: relogue e rode 'ccx_codex add'"
+
+# Codigo que o endpoint de usage devolve quando o proprio servidor considera o
+# token invalidado ("Encountered invalidated oauth token for user"). E o unico
+# 401 que autoriza um refresh fora do calendario: 401 sem ele acontece de forma
+# transitoria e nao pode custar uma rotacao de token.
+REVOKED_USAGE_CODE = "token_revoked"
 
 # Codigos de erro documentados como permanentes pela propria API de refresh da
 # OpenAI (visto no codex-lb, app/core/balancer/logic.py): refresh token morto
@@ -181,7 +188,16 @@ def refresh_tokens(tokens: dict) -> tuple[dict | None, str]:
         except Exception:
             err = {}
         error_field = err.get("error")
-        code = (error_field if isinstance(error_field, str) else None) or err.get("code")
+        if isinstance(error_field, str):
+            code = error_field
+        elif isinstance(error_field, dict):
+            # Formato real observado na OpenAI: o codigo vem aninhado, como em
+            # {"error": {"code": "refresh_token_invalidated"}}. Sem este ramo o
+            # grant revogado voltava como "transient" e o slot nunca morria.
+            code = error_field.get("code")
+        else:
+            code = None
+        code = code or err.get("code")
         if e.code in (400, 401, 403) and (code in DEAD_REFRESH_CODES or "invalid_grant" in raw):
             return None, "dead"
         return None, "transient"
@@ -322,27 +338,81 @@ def store_lock():
     return dir_lock(STORE.parent / "codex_store")
 
 
+def _error_code(e: urllib.error.HTTPError) -> str:
+    """error.code do corpo da resposta, ou "" se nao der para ler.
+
+    Nunca levanta: isto roda dentro do tratamento de um erro e nao pode virar
+    uma segunda falha.
+    """
+    try:
+        body = json.loads(e.read().decode(errors="replace"))
+        return body["error"]["code"] or ""
+    except Exception:
+        return ""
+
+
+def _try_usage(tokens: dict, slot: dict) -> tuple[dict | None, str, str]:
+    """(cota, erro, codigo do corpo). Os dois primeiros sao o que slot_usage
+    sempre devolveu; o terceiro morre dentro de slot_usage e nunca escapa.
+    """
+    try:
+        return fetch_usage(tokens["access_token"], slot.get("account_id", "")), "", ""
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}", _error_code(e)
+    except Exception as e:
+        return None, type(e).__name__, ""
+
+
+def mark_dead(key: str, slot: dict, store: dict) -> None:
+    """Marca o slot e o tira da decisao na mesma coleta.
+
+    Descartar o usage_cache junto e o que impede remember_slot_usage de
+    reaproveitar a ultima leitura boa por USAGE_STALE_DECISION_TTL_S e
+    pick_target de eleger uma conta que ja sabemos morta.
+    """
+    slot["dead"] = True
+    store.get("usage_cache", {}).pop(key, None)
+    ccx.write_json(STORE, store)
+
+
 def slot_usage(key: str, slot: dict, is_active: bool, store: dict) -> tuple[dict | None, str]:
     tokens = slot["tokens"]
+    refreshed = False
     if not is_active and token_expired(tokens):
         new, err = refresh_tokens(tokens)
         if new:
             slot["tokens"] = new
             tokens = new
+            refreshed = True
             ccx.write_json(STORE, store)
         elif err == "dead":
-            slot["dead"] = True
-            ccx.write_json(STORE, store)
+            mark_dead(key, slot, store)
         else:
             return None, f"refresh falhou ({err})"
     if slot.get("dead"):
-        return None, "token morto: relogue e rode 'ccx_codex add'"
-    try:
-        return fetch_usage(tokens["access_token"], slot.get("account_id", "")), ""
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}"
-    except Exception as e:
-        return None, type(e).__name__
+        return None, DEAD_SLOT_MSG
+    usage, error, code = _try_usage(tokens, slot)
+    # O status precisa entrar na condicao junto com o codigo: um 500 com
+    # "token_revoked" no corpo e falha de servidor, nao grant morto, e nao pode
+    # custar uma rotacao de credencial.
+    if error != "HTTP 401" or code != REVOKED_USAGE_CODE or is_active or refreshed:
+        return usage, error
+    # O servidor afirmou que este token foi invalidado e o exp ainda nao passou,
+    # entao o caminho normal de refresh nunca rodaria e o slot ficaria em loop de
+    # HTTP 401 para sempre. Um refresh aqui e o unico jeito de classifica-lo.
+    # 401 SEM esse codigo nao entra: o endpoint de usage devolve 401 transitorio
+    # (visto nas quatro contas de uma vez), e rotacionar token de conta saudavel
+    # e como se chega em refresh_token_reused.
+    new, err = refresh_tokens(tokens)
+    if err == "dead":
+        mark_dead(key, slot, store)
+        return None, DEAD_SLOT_MSG
+    if not new:
+        return usage, error
+    slot["tokens"] = new
+    ccx.write_json(STORE, store)
+    usage, error, _ = _try_usage(new, slot)
+    return usage, error
 
 
 def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | None]:

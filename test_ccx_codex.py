@@ -424,6 +424,296 @@ def test_flags_invalidas_sao_recusadas():
             assert e.code != 0, argv
 
 
+# --------------------------------------------------------------------------
+# token revogado no servidor com exp ainda valido
+#
+# Cenario real de 2026-08-14: 'codex logout' faz POST /oauth/revoke, entao o
+# grant morre no servidor enquanto o access token guardado no slot continua
+# valido no papel por dias. Antes deste bloco o slot ficava em loop de HTTP 401
+# para sempre, porque o refresh (unico caminho que classifica como morto) so
+# rodava depois que o exp passava.
+
+
+def usage_401(code: str = "token_revoked"):
+    """HTTPError 401 do endpoint de usage, com o corpo real da OpenAI."""
+    import urllib.error
+
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Encountered invalidated oauth token for user, failing request",
+                "code": code,
+            },
+            "status": 401,
+        }
+    ).encode()
+    return urllib.error.HTTPError("url", 401, "Unauthorized", {}, None), body
+
+
+def slot_vivo(**extra):
+    """Slot com exp longe: sem isto o refresh dispararia pelo caminho antigo."""
+    now = datetime.now(timezone.utc).timestamp()
+    slot = {
+        "email": "a@x.com",
+        "tokens": {"access_token": make_jwt({"exp": now + 864000}), "refresh_token": "rt"},
+        "account_id": "acc-1",
+    }
+    slot.update(extra)
+    return slot
+
+
+def test_refresh_tokens_classifica_codigo_aninhado():
+    import urllib.error
+
+    # Formato real da OpenAI: o codigo vem dentro de "error", nao na raiz.
+    # Antes deste ramo isto voltava "transient" e o slot nunca morria.
+    body = json.dumps(
+        {
+            "error": {
+                "message": "Your session has ended. Please log in again.",
+                "type": "invalid_request_error",
+                "code": "refresh_token_invalidated",
+            }
+        }
+    ).encode()
+    exc = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+    exc.read = lambda: body
+    with mock.patch.object(ccx.urllib.request, "urlopen", side_effect=exc):
+        new, err = ccx_codex.refresh_tokens({"refresh_token": "rt"})
+    assert new is None and err == "dead"
+
+    # codigo aninhado que nao e permanente continua transitorio
+    body2 = json.dumps({"error": {"code": "server_error"}}).encode()
+    exc2 = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+    exc2.read = lambda: body2
+    with mock.patch.object(ccx.urllib.request, "urlopen", side_effect=exc2):
+        new, err = ccx_codex.refresh_tokens({"refresh_token": "rt"})
+    assert new is None and err == "transient"
+
+
+def test_slot_morto_nao_e_eleito_pelo_cache():
+    # remember_slot_usage preserva a ultima leitura boa por 300s quando o
+    # resultado novo e erro. Sem descartar o cache ao marcar morto, pick_target
+    # elegeria a conta revogada por ate cinco minutos.
+    conhecida = {"5h": {"pct": 1.0, "resets_at": None}}
+    store = {
+        "slots": {"1": slot_vivo(), "2": slot_vivo(email="b@x.com")},
+        "usage_cache": {"1": {"at": 100.0, "usage": conhecida, "error": "", "known_at": 100.0}},
+    }
+    exc, body = usage_401()
+    exc.read = lambda: body
+
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx.urllib.request, "urlopen", side_effect=exc),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(None, "dead")),
+    ):
+        usage, erro = ccx_codex.slot_usage("1", store["slots"]["1"], False, store)
+
+    assert usage is None and erro == ccx_codex.DEAD_SLOT_MSG
+    assert "1" not in store["usage_cache"]
+
+    # e o que a coleta grava depois nao ressuscita a leitura boa
+    ccx.remember_slot_usage(store, "1", usage, erro, 120.0)
+    usage_map = {"1": store["usage_cache"]["1"]["usage"], "2": {"5h": {"pct": 90.0}}}
+    assert usage_map["1"] is None
+    assert ccx.pick_target(usage_map, 80.0, "consume-first") != "1"
+
+
+def test_slot_usage_devolve_sempre_dois_elementos():
+    # collect faz "usage_map[key], err_map[key] = cached" e repassa com *cached
+    # para remember_slot_usage: um terceiro elemento quebraria os dois.
+    store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    boa = {"5h": {"pct": 10.0, "resets_at": None}}
+    exc, body = usage_401()
+    exc.read = lambda: body
+
+    with mock.patch.object(ccx_codex, "fetch_usage", return_value=boa):
+        assert len(ccx_codex.slot_usage("1", slot, False, store)) == 2
+
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx.urllib.request, "urlopen", side_effect=exc),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=({"access_token": "novo"}, "")),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=[urllib_401(), boa]),
+    ):
+        assert len(ccx_codex.slot_usage("1", slot, False, store)) == 2
+
+    assert len(ccx_codex.slot_usage("1", slot_vivo(dead=True), False, store)) == 2
+
+
+def urllib_401(code: str = "token_revoked"):
+    exc, body = usage_401(code)
+    exc.read = lambda: body
+    return exc
+
+
+def test_slot_usage_marca_morto_quando_401_e_refresh_permanente():
+    store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=urllib_401()),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(None, "dead")) as refresh,
+    ):
+        usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+    refresh.assert_called_once()
+    assert usage is None and erro == ccx_codex.DEAD_SLOT_MSG
+    assert slot["dead"] is True
+
+
+def test_slot_usage_recupera_quando_401_e_refresh_funciona():
+    store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    boa = {"5h": {"pct": 12.0, "resets_at": None}}
+    novos = {"access_token": "novo", "refresh_token": "rt2"}
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=[urllib_401(), boa]),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(novos, "")),
+    ):
+        usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+    assert usage == boa and erro == ""
+    assert slot["tokens"] == novos
+    assert "dead" not in slot
+
+
+def test_slot_usage_ignora_401_sem_codigo_token_revoked():
+    # O endpoint de usage devolve 401 transitorio: em 2026-08-14 as quatro
+    # contas deram 401 juntas e voltaram 200 segundos depois. Refresh aqui
+    # rotacionaria o token de conta saudavel a toa.
+    import urllib.error
+
+    outro = urllib_401("some_other_code")
+
+    sem_codigo = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+    sem_codigo.read = lambda: json.dumps({"error": {"message": "nope"}}).encode()
+
+    nao_json = urllib.error.HTTPError("url", 401, "Unauthorized", {}, None)
+    nao_json.read = lambda: b"<html>proxy</html>"
+
+    for exc in (outro, sem_codigo, nao_json):
+        store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+        slot = store["slots"]["1"]
+        with (
+            mock.patch.object(ccx, "write_json"),
+            mock.patch.object(ccx_codex, "fetch_usage", side_effect=exc),
+            mock.patch.object(ccx_codex, "refresh_tokens") as refresh,
+        ):
+            usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+        refresh.assert_not_called()
+        assert usage is None and erro == "HTTP 401"
+        assert "dead" not in slot
+
+
+def test_slot_usage_nao_marca_morto_em_401_com_refresh_transitorio():
+    store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=urllib_401()),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(None, "transient")),
+    ):
+        usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+    assert usage is None and erro == "HTTP 401"
+    assert "dead" not in slot
+
+
+def test_collect_nao_repete_usage_dentro_do_ttl_de_erro():
+    # Critério 3: a nova tentativa so vem depois que o erro sai do usage_cache,
+    # nao na checagem seguinte. Vale para todo erro, nao so para o 401.
+    from contextlib import nullcontext
+
+    fresh = {"slots": {"1": slot_vivo()}, "last_switch": 0, "usage_cache": {}}
+    chamadas = []
+
+    def falso_slot_usage(key, slot, is_active, store):
+        chamadas.append(key)
+        return None, "HTTP 401"
+
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "active_slot", return_value=None),
+        mock.patch.object(ccx_codex, "sync_active_slot"),
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "slot_usage", side_effect=falso_slot_usage),
+        mock.patch.object(ccx.time, "time", side_effect=[1000.0, 1010.0]),
+    ):
+        primeira = ccx_codex.collect({})
+        segunda = ccx_codex.collect({})
+
+    assert primeira[1] == {"1": "HTTP 401"}
+    assert segunda[1] == {"1": "HTTP 401"}
+    assert len(chamadas) == 1, "o cache de erro de 120s deve evitar a segunda leitura"
+
+
+def test_slot_usage_nao_renova_conta_ativa_em_401():
+    # A conta ativa e do Codex CLI. Renovar por baixo dele invalida o token que
+    # o processo em execucao esta usando.
+    store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=urllib_401()),
+        mock.patch.object(ccx_codex, "refresh_tokens") as refresh,
+    ):
+        usage, erro = ccx_codex.slot_usage("1", slot, True, store)
+    refresh.assert_not_called()
+    assert usage is None and erro == "HTTP 401"
+    assert "dead" not in slot
+
+
+def test_slot_usage_nao_renova_duas_vezes_na_mesma_chamada():
+    # exp vencido ja gastou o refresh no topo da funcao; um 401 depois disso
+    # nao pode gastar outro.
+    now = datetime.now(timezone.utc).timestamp()
+    vencido = {"access_token": make_jwt({"exp": now + 60}), "refresh_token": "rt"}
+    store = {"slots": {"1": slot_vivo(tokens=vencido)}, "usage_cache": {}}
+    slot = store["slots"]["1"]
+    novos = {"access_token": make_jwt({"exp": now + 864000}), "refresh_token": "rt2"}
+    with (
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx_codex, "fetch_usage", side_effect=urllib_401()),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(novos, "")) as refresh,
+    ):
+        usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+    assert refresh.call_count == 1
+    assert usage is None and erro == "HTTP 401"
+    assert "dead" not in slot
+
+
+def test_slot_usage_nao_renova_em_erro_que_nao_e_401():
+    import urllib.error
+
+    # O 500 com "token_revoked" no corpo e o caso que a review cruzada pegou:
+    # falha de servidor nao pode virar rotacao de credencial so porque o corpo
+    # trouxe a string. O status tem de entrar na decisao junto com o codigo.
+    quinhentos_com_codigo = urllib.error.HTTPError("url", 500, "boom", {}, None)
+    quinhentos_com_codigo.read = lambda: json.dumps({"error": {"code": "token_revoked"}}).encode()
+
+    erros = [
+        urllib.error.HTTPError("url", 429, "slow down", {}, None),
+        urllib.error.HTTPError("url", 500, "boom", {}, None),
+        quinhentos_com_codigo,
+        TimeoutError("timeout"),
+    ]
+    esperados = ["HTTP 429", "HTTP 500", "HTTP 500", "TimeoutError"]
+    for exc, esperado in zip(erros, esperados):
+        store = {"slots": {"1": slot_vivo()}, "usage_cache": {}}
+        slot = store["slots"]["1"]
+        with (
+            mock.patch.object(ccx, "write_json"),
+            mock.patch.object(ccx_codex, "fetch_usage", side_effect=exc),
+            mock.patch.object(ccx_codex, "refresh_tokens") as refresh,
+        ):
+            usage, erro = ccx_codex.slot_usage("1", slot, False, store)
+        refresh.assert_not_called()
+        assert usage is None and erro == esperado
+        assert "dead" not in slot
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
