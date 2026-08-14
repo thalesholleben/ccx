@@ -626,6 +626,15 @@ def cmd_auto(args: argparse.Namespace) -> int:
             except TimeoutError as e:
                 print(f"[{time.strftime('%H:%M:%S')}] {e}")
                 delay = ccx.random.uniform(*ccx.POLL_WIDE)
+            except Exception as e:
+                # Falha inesperada de disco/rede nao pode abandonar a rotacao.
+                delay = ccx.random.uniform(*ccx.POLL_WIDE)
+                message = (
+                    f"erro no monitor: {type(e).__name__}; "
+                    f"tentando de novo em {ccx.fmt_delay(delay)}"
+                )
+                print(f"[{time.strftime('%H:%M:%S')}] {message}")
+                ccx.auto_event(message)
             time.sleep(delay)
     except KeyboardInterrupt:
         print("\nsaindo")

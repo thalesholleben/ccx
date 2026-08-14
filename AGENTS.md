@@ -18,12 +18,13 @@ CLI ja usam.
 ## Comandos de validacao
 
 ```bash
-python test_ccx.py         # 35 testes, engine de decisao + IO do modulo Claude
-python test_ccx_codex.py   # 18 testes, especifico do modulo Codex
+python test_ccx.py         # 42 testes, engine de decisao + IO do modulo Claude
+python test_ccx_codex.py   # 19 testes, especifico do modulo Codex
+python test_ccx_profile.py # launcher opt-in de perfis isolados
 ```
 
 Sem framework de teste, so `assert` e um runner minimo no final de cada
-arquivo. Rodar os dois antes de qualquer PR.
+arquivo. Rodar os três antes de qualquer PR.
 
 ## Regras ao editar
 
@@ -59,11 +60,22 @@ arquivo. Rodar os dois antes de qualquer PR.
 - `pinned_slot` invalido (slot inexistente ou tipo errado) levanta erro em vez
   de virar `None`. Cair em rotacao silenciosa e pior do que parar: o operador
   fixou justamente para a conta nao mudar.
+- Locks internos do CCX guardam PID, id e marca de criação do processo. PID vivo
+  com marca divergente é reciclado e pode ser retomado; marca temporariamente
+  ilegível ou lock legado sem marca conserva o lock enquanto o PID estiver vivo.
+  `discard_lock(..., None)` só pode remover um diretório ainda vazio: nunca apague
+  `owner.json` sem conferir a identidade do dono.
+- Falha antes do loop de `ccx.py auto` só vai para `auto.log` como classe da exceção
+  ou como configuração insuficiente; nunca registre `str(exc)`, token ou payload.
 - A troca do arquivo global de autenticacao serve para uso sequencial. Um
   processo persistente do Codex pode manter a identidade em memoria e nao
   migrar de conta. Nao documentar esse hot-swap como isolamento seguro entre
   agentes paralelos; isso exige perfis por processo (`CODEX_HOME` /
   `CLAUDE_CONFIG_DIR`) ou um proxy com afinidade de sessao.
+- `ccx_profile.py` e o caminho opt-in para paralelismo: não copie tokens nem
+  mude o ambiente do processo pai. Ele só cria o diretório do perfil e inicia
+  um processo filho com `CLAUDE_CONFIG_DIR` ou `CODEX_HOME` próprio. Para
+  Codex, preserve a flag `cli_auth_credentials_store="file"` antes dos args.
 - Nunca commitar `~/.ccx/accounts.json` ou `~/.ccx/codex_accounts.json`
   (tokens OAuth reais). Ja estao no `.gitignore`.
 

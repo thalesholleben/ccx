@@ -382,6 +382,34 @@ def test_window_label_arredonda_horas_e_dias():
     assert ccx_codex._window_label(0, "?") == "?"
 
 
+def test_auto_codex_sobrevive_erro_inesperado_sem_vazar_detalhe():
+    args = SimpleNamespace(
+        pin=None, once=False, strategy="consume-first", threshold=80, poll=0, cooldown=300
+    )
+    store = {"slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}}}
+    guard = mock.MagicMock()
+    with (
+        mock.patch.object(ccx_codex, "load_store", return_value=store),
+        mock.patch.object(ccx_codex, "dir_lock", return_value=guard),
+        mock.patch.object(
+            ccx_codex, "check_once", side_effect=RuntimeError("token-super-secreto")
+        ),
+        mock.patch.object(ccx_codex.ccx.random, "uniform", return_value=123.0),
+        mock.patch.object(ccx_codex.time, "sleep", side_effect=KeyboardInterrupt),
+        mock.patch.object(ccx_codex.ccx, "auto_event") as event,
+        mock.patch("builtins.print") as output,
+    ):
+        assert ccx_codex.cmd_auto(args) == 0
+
+    event.assert_called_once()
+    logged = event.call_args.args[0]
+    printed = " ".join(str(arg) for call in output.call_args_list for arg in call.args)
+    assert "RuntimeError" in logged
+    assert "token-super-secreto" not in logged
+    assert "token-super-secreto" not in printed
+    guard.__exit__.assert_called_once_with(None, None, None)
+
+
 def test_flags_invalidas_sao_recusadas():
     for argv in (
         ["--threshold", "101", "status"],

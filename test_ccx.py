@@ -649,6 +649,126 @@ def test_lock_timeout_zero_nao_toma_lock_stale_de_processo_vivo():
             ccx.STORE = old_store
 
 
+def test_lock_interno_grava_marca_do_processo():
+    with tempfile.TemporaryDirectory() as tmp:
+        old_store = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        target = Path(tmp) / "auto"
+        lock = Path(tmp) / "auto.lock"
+        try:
+            with mock.patch.object(ccx, "process_start_marker", return_value="inicio"):
+                with ccx.claude_lock(target):
+                    assert ccx.lock_owner(lock)["process_start"] == "inicio"
+        finally:
+            ccx.STORE = old_store
+
+
+def test_marca_do_processo_atual_no_windows():
+    if os.name == "nt":
+        marker = ccx.process_start_marker(os.getpid())
+        assert marker is not None and marker.isdecimal()
+
+
+def test_lock_com_pid_reciclado_e_retomado_com_seguranca():
+    with tempfile.TemporaryDirectory() as tmp:
+        old_store = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        target = Path(tmp) / "auto"
+        lock = Path(tmp) / "auto.lock"
+        lock.mkdir()
+        ccx.write_json(
+            lock / ccx.LOCK_OWNER_FILE,
+            {"pid": 4242, "id": "antigo", "process_start": "inicio-antigo"},
+        )
+        try:
+            with (
+                mock.patch.object(ccx, "process_alive", return_value=True),
+                mock.patch.object(ccx, "process_start_marker", return_value="inicio-novo"),
+            ):
+                assert not ccx.auto_monitor_alive()
+                with ccx.claude_lock(target, timeout=0):
+                    assert ccx.lock_owner(lock)["process_start"] == "inicio-novo"
+        finally:
+            ccx.discard_lock(lock, "antigo")
+            ccx.STORE = old_store
+
+
+def test_lock_com_marcador_indisponivel_nao_e_tomado():
+    with tempfile.TemporaryDirectory() as tmp:
+        old_store = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        target = Path(tmp) / "auto"
+        lock = Path(tmp) / "auto.lock"
+        lock.mkdir()
+        ccx.write_json(
+            lock / ccx.LOCK_OWNER_FILE,
+            {"pid": 4242, "id": "vivo", "process_start": "inicio"},
+        )
+        try:
+            with (
+                mock.patch.object(ccx, "process_alive", return_value=True),
+                mock.patch.object(ccx, "process_start_marker", return_value=None),
+            ):
+                assert ccx.auto_monitor_alive()
+                try:
+                    with ccx.claude_lock(target, timeout=0):
+                        raise AssertionError("lock vivo nao pode ser tomado")
+                except TimeoutError:
+                    pass
+        finally:
+            ccx.discard_lock(lock, "vivo")
+            ccx.STORE = old_store
+
+
+def test_discard_lock_sem_id_nao_apaga_owner_de_outro_processo():
+    with tempfile.TemporaryDirectory() as tmp:
+        lock = Path(tmp) / "auto.lock"
+        lock.mkdir()
+        ccx.write_json(lock / ccx.LOCK_OWNER_FILE, {"pid": 1, "id": "outro"})
+        try:
+            assert not ccx.discard_lock(lock)
+            assert ccx.lock_owner(lock)["id"] == "outro"
+        finally:
+            ccx.discard_lock(lock, "outro")
+
+
+def test_auto_registra_falha_antes_do_loop_sem_vazar_detalhes():
+    args = SimpleNamespace(
+        pin=None, once=False, strategy="consume-first", threshold=80, poll=0, cooldown=300
+    )
+    with (
+        mock.patch.object(ccx, "load_store", return_value={"slots": {"1": {}}}),
+        mock.patch.object(ccx, "auto_event") as event,
+    ):
+        assert ccx.cmd_auto(args) == 1
+    event.assert_called_once_with("monitor nao iniciou: menos de duas contas")
+
+    with (
+        mock.patch.object(ccx, "load_store", side_effect=OSError("segredo")),
+        mock.patch.object(ccx, "auto_event") as event,
+    ):
+        try:
+            ccx.cmd_auto(args)
+            raise AssertionError("deveria propagar a falha de inicializacao")
+        except OSError:
+            pass
+    event.assert_called_once_with("monitor nao iniciou (OSError)")
+
+    with (
+        mock.patch.object(
+            ccx, "load_store", return_value={"slots": {"1": {}, "2": {}}}
+        ),
+        mock.patch.object(ccx, "claude_lock", side_effect=OSError("segredo")),
+        mock.patch.object(ccx, "auto_event") as event,
+    ):
+        try:
+            ccx.cmd_auto(args)
+            raise AssertionError("deveria propagar a falha do lock")
+        except OSError:
+            pass
+    event.assert_called_once_with("monitor nao iniciou (OSError)")
+
+
 def test_auto_sobrevive_a_erro_inesperado():
     """Um erro fora dos ramos esperados nao pode encerrar a rotacao."""
     args = SimpleNamespace(
@@ -671,7 +791,7 @@ def test_auto_sobrevive_a_erro_inesperado():
 def test_watchdog_relanca_monitor_morto_sem_consultar_usage():
     with (
         mock.patch.object(ccx_watchdog, "monitor_alive", return_value=False),
-        mock.patch.object(ccx_watchdog, "start_monitor") as start,
+        mock.patch.object(ccx_watchdog, "start_monitor", return_value=0) as start,
     ):
         assert ccx_watchdog.main() == 0
     start.assert_called_once()
@@ -682,6 +802,35 @@ def test_watchdog_relanca_monitor_morto_sem_consultar_usage():
     ):
         assert ccx_watchdog.main() == 0
     start.assert_not_called()
+
+
+def test_watchdog_registra_falha_precoce_sem_ler_saida():
+    child = mock.Mock()
+    child.wait.side_effect = ccx_watchdog.subprocess.TimeoutExpired(["ccx.py"], 1)
+    with (
+        mock.patch.object(ccx_watchdog.subprocess, "Popen", return_value=child),
+        mock.patch.object(ccx_watchdog.ccx, "auto_event") as event,
+    ):
+        assert ccx_watchdog.start_monitor() == 0
+    event.assert_called_once_with("watchdog relancou o monitor")
+
+    child = mock.Mock()
+    child.wait.return_value = 1
+    with (
+        mock.patch.object(ccx_watchdog.subprocess, "Popen", return_value=child),
+        mock.patch.object(ccx_watchdog.ccx, "auto_event") as event,
+    ):
+        assert ccx_watchdog.start_monitor() == 1
+    event.assert_called_once_with("monitor encerrou antes de estabilizar (codigo 1)")
+
+    with (
+        mock.patch.object(
+            ccx_watchdog.subprocess, "Popen", side_effect=OSError("segredo")
+        ),
+        mock.patch.object(ccx_watchdog.ccx, "auto_event") as event,
+    ):
+        assert ccx_watchdog.start_monitor() == 1
+    event.assert_called_once_with("watchdog nao iniciou o monitor (OSError)")
 
 
 def test_watchdog_nao_duplica_monitor_suspenso_com_pid_vivo():
@@ -705,6 +854,11 @@ def test_instalador_usa_pythonw_para_nao_piscar_console():
     )
     assert "$pythonw =" in installer
     assert "-Execute $pythonw" in installer
+    assert "-CommandType Application" in installer
+    assert "Start-Process -FilePath $pythonw" in installer
+    assert "Stop-ScheduledTask" in installer
+    assert "Get-CimInstance Win32_Process" in installer
+    assert "Stop-Process -Id $monitorPid -Force" in installer
 
 
 def test_token_expirado():

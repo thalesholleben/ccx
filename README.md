@@ -21,7 +21,8 @@ Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 > padrão suportado pelos clientes é iniciar cada processo com um perfil isolado:
 > [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) no Claude e
 > [`CODEX_HOME`](https://developers.openai.com/codex/auth#credential-storage)
-> no Codex. O `ccx` ainda não orquestra esses perfis.
+> no Codex. O launcher opt-in `ccx_profile.py` inicia esses perfis sem tocar na
+> credencial global de uma sessão já aberta.
 
 ---
 
@@ -31,6 +32,7 @@ Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 - [Setup](#setup)
 - [Comandos](#comandos)
 - [Estratégias de troca](#estratégias-de-troca)
+- [Perfis isolados](#perfis-isolados)
 - [Intervalo de checagem](#intervalo-de-checagem)
 - [Monitor contínuo no Windows](#monitor-contínuo-no-windows)
 - [No VS Code](#no-vs-code)
@@ -120,6 +122,29 @@ exceção temporária: na próxima checagem (no máximo ~60s) o monitor volta pa
 slot fixado. Para sair de vez do slot, use `--pin off` ou `--pin` no outro slot.
 O `status` e o `stats` avisam qual slot está fixado em vez de recomendar troca.
 
+## Perfis isolados
+
+Para agentes ou sessões paralelas, use o launcher opt-in `ccx_profile.py`. Ele
+não lê nem altera os slots globais do CCX, `~/.claude`, `~/.codex` ou um cliente
+já aberto: inicia um novo processo com seu próprio diretório de configuração.
+
+```powershell
+# faça login uma vez em cada perfil, escolhendo a conta naquele fluxo interativo
+python ccx_profile.py login claude 1
+python ccx_profile.py login codex 2
+
+# execute uma sessão nova no perfil correspondente
+python ccx_profile.py run claude 1 -- --model opus -p "revise este diff"
+python ccx_profile.py run codex 2 -- --model gpt-5.2-codex
+```
+
+Os perfis ficam em `~/.ccx/profiles/claude/N` e `~/.ccx/profiles/codex/N`.
+O `N` é apenas o rótulo do perfil; não equivale a um slot global do `ccx`. Para
+Codex, o launcher força o backend de credenciais em arquivo no processo filho,
+evitando compartilhar o keyring com outra sessão. Settings, plugins e histórico
+também ficam separados por perfil. Não combine `ccx_codex auto` com agentes
+persistentes: rotação global continua sendo para invocações sequenciais.
+
 ## Monitor contínuo no Windows
 
 Para a rotação continuar sem depender de uma janela do VS Code, instale uma vez o
@@ -133,12 +158,18 @@ cd C:\caminho\para\ccx
 Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. A
 tarefa executa um watchdog a cada minuto: ele só lê o lock local do monitor
 (não consulta usage) e relança o `ccx auto` em processo destacado se ele morrer. Ela
-continua funcionando na bateria. O lock interno registra o PID do dono: processo
-morto é retomado sem esperar o timeout, enquanto um processo apenas suspenso não
-ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
+continua funcionando na bateria. O lock interno registra o PID e a marca de criação
+do dono: PID reciclado é tratado como processo morto sem esperar o timeout, enquanto
+um processo apenas suspenso não ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
 encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
 O watchdog usa `pythonw.exe`, portanto não abre uma janela de terminal a cada minuto.
+Antes de registrar a tarefa, o instalador rejeita o alias da Microsoft Store e
+confirma um executável Python 3.10+ real. Se o monitor terminar no primeiro
+segundo, o watchdog registra apenas o código de saída no log seguro; ele nunca
+captura a saída do processo, que poderia conter credenciais.
+Se o próprio `ccx auto` falhar antes do loop, o log registra somente a classe da
+falha ou o caso de menos de duas contas, nunca a mensagem da exceção.
 Se a tarefa for desativada manualmente no Agendador, ela continua desativada após
 reiniciar o Windows. O `status` avisa que o monitor está offline; rode o instalador
 de novo para habilitá-la.
@@ -150,6 +181,10 @@ remover a tarefa:
 ```powershell
 .\install-ccx-monitor.ps1 -Uninstall
 ```
+
+O desinstalador desabilita e remove a tarefa e encerra somente um processo cuja
+imagem e linha de comando confirmem que é este monitor do CCX. Ele nunca encerra
+um PID não verificado e deixa a recuperação do lock para o próprio monitor.
 
 ## Estratégias de troca
 
@@ -319,7 +354,10 @@ credencial nova (não expirada) e ele aborta o próprio refresh.
 O mesmo mecanismo de lock é reusado para a trava de instância única do `auto`, em
 `~/.ccx/auto.lock`, com timeout 0 para falhar na hora em vez de esperar.
 Somente os locks internos do CCX (`auto` e `store`) recebem um arquivo de dono com
-PID; os locks do próprio Claude Code continuam vazios e seguem o protocolo original.
+PID e marca de criação; os locks do próprio Claude Code continuam vazios e seguem o
+protocolo original. Isso impede que um PID reciclado faça um monitor morto parecer
+vivo. Locks legados sem marca continuam compatíveis e só são considerados vivos com
+PID ainda existente.
 
 ### Concorrência entre os próprios comandos
 
@@ -431,8 +469,9 @@ python -c "import ccx_watchdog; print('vivo' if ccx_watchdog.monitor_alive() els
 ```
 
 Para os locks internos do CCX, PID vivo com heartbeat velho pode ser apenas uma
-suspensão: o watchdog não duplica o monitor nesse caso. PID morto (ou lock legado
-sem dono com mtime velho) é tomado automaticamente; não apague o lock na mão.
+suspensão: o watchdog não duplica o monitor nesse caso. Um PID reciclado, PID morto
+ou lock legado sem dono com mtime velho é tomado automaticamente; não apague o lock
+na mão.
 
 **Saber por que o monitor permanente reiniciou:** abra `~/.ccx/auto.log` e confira
 o estado da tarefa `\CCX\Claude Monitor` no Agendador do Windows. O log registra
@@ -448,6 +487,40 @@ particular, mantém um snapshot em memória e não observa alteração externa d
 `auth.json` até um reload explícito; também recusa cruzar a identidade da sessão
 para outra conta/workspace sem reconstruir seu estado
 ([fonte](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
+
+**`codex logout` mata a conta no servidor, não só no disco.** O binário do Codex CLI
+(0.144.1, strings `failed to revoke auth tokens during logout` e
+`CODEX_REVOKE_TOKEN_URL_OVERRIDE ... https://auth.openai.com/oauth/revoke`) faz um
+`POST /oauth/revoke` antes de apagar o `auth.json`. Isso invalida o grant inteiro
+daquela conta na OpenAI, incluindo a cópia que o `ccx_codex` guardou no slot. Sintoma:
+depois de trocar de conta com `codex logout && codex login`, a conta anterior passa a
+dar `HTTP 401` com `"code": "token_revoked"` no usage e
+`"code": "refresh_token_invalidated"` ("Your session has ended") no refresh, mesmo com
+o `exp` do access token ainda longe. Para cadastrar uma conta nova **nunca use
+`codex logout`**: faça o login num `CODEX_HOME` separado, que é o que o
+`ccx_profile.py` já monta, e capture de lá.
+
+```powershell
+python ccx_profile.py login codex 2          # navegador; não encosta no auth.json principal
+$env:CODEX_HOME = "$HOME\.ccx\profiles\codex\2"
+python ccx_codex.py add 2                    # casa por e-mail, revive o slot e limpa o MORTO
+Remove-Item Env:CODEX_HOME
+Remove-Item -Recurse -Force "$HOME\.ccx\profiles\codex\2"
+```
+
+O `ccx_profile.py` é preferível a um `CODEX_HOME` qualquer por dois motivos: ele força
+`cli_auth_credentials_store="file"` (sem isso a credencial pode ir para o keyring e o
+`add` não acha `auth.json`) e o diretório fica fora de `%TEMP%`, onde o Codex recusa
+criar os aliases de PATH. Apagar o perfil no fim é deliberado: manter a mesma conta em
+dois lugares faz os dois rodarem o refresh e rotacionarem o token um do outro, que é o
+caminho para `refresh_token_reused`. Só conserve o perfil se aquela conta for viver
+isolada, e nesse caso não a cadastre também na rotação global.
+
+Detalhe correlato: um token revogado desse jeito **não é marcado `MORTO`
+automaticamente**. O `slot_usage` só tenta o refresh (o único caminho que detecta
+`dead`) quando o `exp` do access token já passou; enquanto ele estiver válido no papel,
+o slot fica em loop de `HTTP 401` no `status`. Até isso mudar, marque na mão ou rode
+`ccx_codex add` com a conta relogada.
 
 ## Limitações
 
@@ -465,8 +538,8 @@ para outra conta/workspace sem reconstruir seu estado
   precisaria entrar na decisão.
 - **A troca é global, não por agente.** Várias sessões abertas no mesmo perfil
   podem manter credenciais em memória, disputar refresh ou continuar na identidade
-  anterior. Para paralelismo real, use processos separados desde o início com
-  `CLAUDE_CONFIG_DIR`/`CODEX_HOME`; agentes internos de uma mesma sessão continuam
+  anterior. Para paralelismo real, use `ccx_profile.py` para iniciar processos
+  separados desde o início; agentes internos de uma mesma sessão continuam
   compartilhando a conta daquela sessão.
 
 ## Termos de uso
@@ -492,14 +565,16 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 35 testes cobrindo:
+Sem framework, só `assert`. 42 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
 - execução silenciosa da checagem usada pelo hook `Stop`
 - continuidade do monitor após erro inesperado
 - watchdog relançando somente monitor morto, sem duplicar processo suspenso
-- retomada com `timeout=0` removendo lock morto sem tomar lock vivo
+- watchdog registrando saída precoce sem capturar stdout/stderr do processo
+- retomada com `timeout=0` removendo lock morto sem tomar lock vivo, inclusive PID
+  reciclado, e sem apagar owner de uma retomada concorrente
 - aviso explícito quando o monitor está offline e instalador sem janela piscando
 - cache/debounce compartilhado, inclusive releitura depois de esperar o lock
 - `HTTP 429` de usage mantendo a ativa sem histórico e trocando quando há
@@ -518,6 +593,15 @@ Sem framework, só `assert`. 35 testes cobrindo:
 Vários desses nasceram de bugs que só apareceram rodando em produção, não de
 casos imaginados. Se um deles quebrar, foi regressão de algo que já falhou uma
 vez.
+
+O launcher de perfis tem sua própria checagem isolada:
+
+```bash
+python test_ccx_profile.py
+```
+
+Ela cobre validação do rótulo, ausência de path traversal, ambiente filho
+isolado e o backend de credenciais em arquivo do Codex.
 
 ## Módulo Codex (ccx_codex)
 
@@ -586,8 +670,8 @@ abertos: eles já carregaram a identidade na memória.
   a extensão, app-server ou agentes já abertos. Uma sessão antiga ainda pode
   tentar renovar o token anterior e terminar em 401
   ([código oficial](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
-  Para contas paralelas, use um `CODEX_HOME` isolado por processo. Essa
-  orquestração ainda não faz parte do `ccx`.
+  Para contas paralelas, use `ccx_profile.py` para iniciar um `CODEX_HOME` isolado
+  por processo.
 - **Workspace em vez de organização.** O aviso de cota compartilhada usa
   `workspace_id` (seats de Team/Enterprise) em vez do `organizationUuid` do
   Claude Code.
@@ -609,13 +693,14 @@ reposiciona a credencial que o Codex CLI oficial usa.
 python test_ccx_codex.py
 ```
 
-Mesmo estilo do `test_ccx.py`, com 18 testes cobrindo o que é específico do Codex: leitura
+Mesmo estilo do `test_ccx.py`, com 19 testes cobrindo o que é específico do Codex: leitura
 de claims do JWT, expiração via `exp`, classificação de erro de refresh
 (permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
 para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na
 troca, identidade sobrevivendo à rotação de refresh token, cache compartilhado,
 429 de usage com decisão baseada em histórico recente, slot fixado curto-circuitando
-a checagem sem consultar cota e troca sem sobrescrever estado concorrente.
+a checagem sem consultar cota, troca sem sobrescrever estado concorrente e continuidade
+do auto após erro inesperado sem vazar detalhe da exceção.
 
 ## Licença
 

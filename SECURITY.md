@@ -25,7 +25,11 @@ locais. Pontos que importam para quem for auditar ou confiar no codigo:
   autenticacao em memoria depois de ler `auth.json`; trocar esse arquivo nao
   migra com seguranca um processo ja aberto. Para agentes simultaneos, use
   perfis separados por processo (`CODEX_HOME` / `CLAUDE_CONFIG_DIR`) ou uma
-  camada de proxy com afinidade de sessao.
+  camada de proxy com afinidade de sessao. `ccx_profile.py` cria esses perfis
+  apenas para o processo filho e não toca nas credenciais globais existentes.
+- **Logs de monitor não carregam o texto da exceção.** Falhas inesperadas durante
+  inicialização ou rotação registram apenas a classe, porque mensagens de rede ou
+  de autenticação podem conter dados sensíveis.
 - **Leituras de cota sao amortizadas entre processos.** `status`, hooks e
   monitores compartilham um cache local curto (30 s para sucesso e 120 s para
   erro). Isso reduz rajadas contra os endpoints oficiais sem atrasar o poll do

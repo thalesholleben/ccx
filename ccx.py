@@ -149,9 +149,9 @@ def lock_owner(lock_dir: Path) -> dict:
     return owner if isinstance(owner, dict) else {}
 
 
-def lock_owner_pid(lock_dir: Path) -> int | None:
+def owner_pid(owner: dict) -> int | None:
     try:
-        pid = int(lock_owner(lock_dir).get("pid"))
+        pid = int(owner.get("pid"))
     except (TypeError, ValueError):
         return None
     return pid if pid > 0 else None
@@ -192,15 +192,86 @@ def process_alive(pid: int) -> bool:
     return True
 
 
+def process_start_marker(pid: int) -> str | None:
+    """Marca de criacao para distinguir um PID reciclado do processo original."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = (
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+            )
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetProcessTimes.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+            )
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+        except OSError:
+            return None
+        if not handle:
+            return None
+        try:
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            ):
+                return None
+            return str((created.dwHighDateTime << 32) | created.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    if sys.platform.startswith("linux"):
+        try:
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="utf-8"
+            ).strip()
+            fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(
+                ")", 1
+            )[1].split()
+            return f"{boot_id}:{fields[19]}"
+        except (IndexError, OSError):
+            return None
+    return None
+
+
+def owner_process_alive(owner: dict) -> bool:
+    """Confere PID e, quando disponivel, a identidade do processo que o criou."""
+    pid = owner_pid(owner)
+    if pid is None or not process_alive(pid):
+        return False
+    marker = owner.get("process_start")
+    if not isinstance(marker, str) or not marker:
+        return True  # lock legado: PID vivo continua sendo a prova mais segura.
+    current = process_start_marker(pid)
+    return current is None or current == marker
+
+
 def auto_monitor_alive() -> bool:
     """Heartbeat do monitor permanente, sem consultar usage."""
     lock_dir = STORE.parent / "auto.lock"
     try:
         if not lock_dir.is_dir():
             return False
-        pid = lock_owner_pid(lock_dir)
-        if pid is not None:
-            return process_alive(pid)
+        owner = lock_owner(lock_dir)
+        if owner_pid(owner) is not None:
+            return owner_process_alive(owner)
         return time.time() - lock_dir.stat().st_mtime < LOCK_STALE_S
     except FileNotFoundError:
         return False
@@ -216,7 +287,11 @@ def _rmdir_lock(lock_dir: Path) -> bool:
 
 def discard_lock(lock_dir: Path, owner_id: str | None = None) -> bool:
     """Remove lock orfao; owner_id impede apagar uma nova instancia por engano."""
-    if owner_id is not None and lock_owner(lock_dir).get("id") != owner_id:
+    if owner_id is None:
+        # Nao exclui owner.json sem identidade: rmdir so vence se o diretorio
+        # ainda estiver vazio, inclusive diante de uma retomada concorrente.
+        return _rmdir_lock(lock_dir)
+    if lock_owner(lock_dir).get("id") != owner_id:
         return False
     try:
         (lock_dir / LOCK_OWNER_FILE).unlink()
@@ -241,6 +316,7 @@ def claude_lock(target: Path, timeout: float = LOCK_TIMEOUT_S):
     owner = {
         "pid": os.getpid(),
         "id": f"{os.getpid()}-{time.time_ns()}-{random.randrange(1 << 30)}",
+        "process_start": process_start_marker(os.getpid()),
     }
     while True:
         try:
@@ -259,10 +335,14 @@ def claude_lock(target: Path, timeout: float = LOCK_TIMEOUT_S):
         except FileNotFoundError:
             continue
         other_owner = lock_owner(lock_dir) if internal_lock else {}
-        other_pid = lock_owner_pid(lock_dir) if internal_lock else None
+        other_pid = owner_pid(other_owner) if internal_lock else None
         # PID morto prova que o lock ficou orfao mesmo antes do timeout. Lock
         # sem owner e legado: nesse caso conserva a regra por idade.
-        stale = internal_lock and other_pid is not None and not process_alive(other_pid)
+        stale = (
+            internal_lock
+            and other_pid is not None
+            and not owner_process_alive(other_owner)
+        )
         stale = stale or (other_pid is None and age > LOCK_STALE_S)
         if stale:
             removed = (
@@ -1022,18 +1102,23 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
-    pin = getattr(args, "pin", None)
-    if pin is not None:
-        pinned, already_active = configure_pin(pin)
-        if pinned:
-            print(f"slot {pinned} fixado")
-            if not already_active:
-                do_switch(load_store(), pinned, only_if_pinned=True)
-        else:
-            print("fixação removida; a rotação automática foi liberada")
-    store = load_store()
+    try:
+        pin = getattr(args, "pin", None)
+        if pin is not None:
+            pinned, already_active = configure_pin(pin)
+            if pinned:
+                print(f"slot {pinned} fixado")
+                if not already_active:
+                    do_switch(load_store(), pinned, only_if_pinned=True)
+            else:
+                print("fixação removida; a rotação automática foi liberada")
+        store = load_store()
+    except Exception as exc:
+        auto_event(f"monitor nao iniciou ({type(exc).__name__})")
+        raise
     if len(store["slots"]) < 2:
         print("Precisa de pelo menos 2 contas. Use 'ccx add' com cada uma logada.")
+        auto_event("monitor nao iniciou: menos de duas contas")
         return 1
     if args.once:
         return check_once(args)[0]
@@ -1047,6 +1132,9 @@ def cmd_auto(args: argparse.Namespace) -> int:
     except TimeoutError:
         print("ccx auto ja esta rodando nesta maquina. Nada a fazer.")
         return 0
+    except Exception as exc:
+        auto_event(f"monitor nao iniciou ({type(exc).__name__})")
+        raise
 
     faixa = "dinamico 100-240s" if not args.poll else f"fixo {args.poll}s"
     print(
