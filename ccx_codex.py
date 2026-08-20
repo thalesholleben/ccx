@@ -67,6 +67,12 @@ OAUTH_SCOPE = "openid profile email"
 
 STORE = Path.home() / ".ccx" / "codex_accounts.json"
 REFRESH_SKEW_S = 300  # 5min, mesma folga do modulo Claude
+# Faixas de poll proprias, em vez das do modulo Claude. La a janela curta e de 5h
+# e se move rapido dentro de uma sessao, o que justifica apertar o poll para
+# 45-60s a partir de 50%. Aqui o rotulo "5h" e so posicional (ver o cabecalho do
+# modulo) e costuma carregar a janela semanal, que sobe devagar e leva dias para
+# resetar: herdar aquela faixa prenderia o poll no ritmo apertado por dias.
+BANDS = ccx.PollBands(wide=(180.0, 240.0), tight=(100.0, 120.0), tighten_at=70.0)
 DEAD_SLOT_MSG = "token morto: relogue e rode 'ccx_codex add'"
 
 # Codigo que o endpoint de usage devolve quando o proprio servidor considera o
@@ -557,12 +563,18 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not target or target == active or hold_active:
         print(
             f"-> proxima checagem em "
-            f"~{ccx.fmt_delay(ccx.next_wake(usage_map, err_map, active))}"
+            f"~{ccx.fmt_delay(ccx.next_wake(usage_map, err_map, active, BANDS))}"
         )
     return 0
 
 
-def do_switch(store: dict, key: str, *, only_if_pinned: bool = False) -> bool:
+def do_switch(
+    store: dict,
+    key: str,
+    *,
+    only_if_pinned: bool = False,
+    reason: str = "",
+) -> bool:
     with store_lock():
         fresh = load_store()
         if only_if_pinned and pinned_slot(fresh) != key:
@@ -577,6 +589,10 @@ def do_switch(store: dict, key: str, *, only_if_pinned: bool = False) -> bool:
         store.clear()
         store.update(fresh)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
+    # Mesmo contrato do modulo Claude: o snapshot da decisao vai junto, senao o
+    # log so diz o destino e o post-mortem nao sabe por que ele foi escolhido.
+    # Percentual e numero de slot podem entrar; token, e-mail e payload nao.
+    ccx.auto_event(f"codex: troca para o slot {key}" + (f" ({reason})" if reason else ""))
     return True
 
 
@@ -594,7 +610,7 @@ def cmd_switch(args: argparse.Namespace) -> int:
     else:
         active = active_slot(store)
         target = keys[(keys.index(active) + 1) % len(keys)] if active else keys[0]
-    do_switch(store, target)
+    do_switch(store, target, reason="manual")
     return 0
 
 
@@ -624,12 +640,12 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
             print(f"[{stamp}] slot {pinned} fixado")
             return 2, ccx.PINNED_CHECK_S
         print(f"[{stamp}] fixação troca {active} -> {pinned}")
-        if do_switch(store, pinned, only_if_pinned=True):
+        if do_switch(store, pinned, only_if_pinned=True, reason="fixacao"):
             return 0, ccx.PINNED_CHECK_S
         return 2, ccx.PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
-    delay = float(args.poll) if args.poll else ccx.next_wake(usage_map, err_map, active)
+    delay = float(args.poll) if args.poll else ccx.next_wake(usage_map, err_map, active, BANDS)
     stamp = time.strftime("%H:%M:%S")
     if ccx.hold_active_on_unknown_usage(store, usage_map, active):
         print(
@@ -652,11 +668,12 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         print(f"[{stamp}] {line}  ok{tail}{nxt}")
         return 2, delay
     waited = time.time() - store["last_switch"]
-    if waited < args.cooldown:
+    if ccx.cooldown_blocks(usage_map, active, waited, args.cooldown):
         print(f"[{stamp}] {line}  cooldown {int(args.cooldown - waited)}s{tail}")
         return 2, min(delay, args.cooldown - waited + 1)
     print(f"[{stamp}] {line}  trocando {active} -> {target}{tail}")
-    do_switch(store, target)
+    motivo = "ativa esgotada" if waited < args.cooldown else "limiar"
+    do_switch(store, target, reason=f"{motivo}; {line}")
     return 0, delay
 
 
@@ -667,7 +684,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
         if pinned:
             print(f"slot {pinned} fixado")
             if not already_active:
-                do_switch(load_store(), pinned, only_if_pinned=True)
+                do_switch(load_store(), pinned, only_if_pinned=True, reason="fixacao")
         else:
             print("fixação removida; a rotação automática foi liberada")
     store = load_store()
@@ -684,7 +701,11 @@ def cmd_auto(args: argparse.Namespace) -> int:
         print("ccx_codex auto ja esta rodando nesta maquina. Nada a fazer.")
         return 0
 
-    faixa = "dinamico 100-240s" if not args.poll else f"fixo {args.poll}s"
+    faixa = (
+        f"dinamico {int(BANDS.tight[0])}-{int(BANDS.wide[1])}s"
+        if not args.poll
+        else f"fixo {args.poll}s"
+    )
     print(
         f"ccx_codex auto: {args.strategy}, limiar {args.threshold}%, poll {faixa}. "
         "Ctrl+C para sair."
@@ -695,10 +716,10 @@ def cmd_auto(args: argparse.Namespace) -> int:
                 _, delay = check_once(args)
             except TimeoutError as e:
                 print(f"[{time.strftime('%H:%M:%S')}] {e}")
-                delay = ccx.random.uniform(*ccx.POLL_WIDE)
+                delay = ccx.random.uniform(*BANDS.wide)
             except Exception as e:
                 # Falha inesperada de disco/rede nao pode abandonar a rotacao.
-                delay = ccx.random.uniform(*ccx.POLL_WIDE)
+                delay = ccx.random.uniform(*BANDS.wide)
                 message = (
                     f"erro no monitor: {type(e).__name__}; "
                     f"tentando de novo em {ccx.fmt_delay(delay)}"

@@ -52,6 +52,23 @@ arquivo. Rodar os três antes de qualquer PR.
 - `do_switch` deve reler o store depois de adquirir o lock. A coleta solta o
   lock antes da decisao, e gravar o snapshot antigo pode ressuscitar refresh
   token ou apagar cache que outro hook acabou de salvar.
+- Limiar e cooldown sao calibrados **juntos**. A folga que o limiar compra,
+  `(100 - threshold) / burn_rate`, tem que ser folgadamente maior que
+  `cooldown + maior POLL_TIGHT`, senao o cooldown sobrevive a folga e o monitor
+  fica preso numa conta que morreu dentro da trava. Mexer em um sem olhar o
+  outro recria o travamento de 19/08/2026.
+- O escape de cooldown (`cooldown_blocks`) dispara em util >= 100, nao no limiar.
+  Escapar no limiar equivale a remover o cooldown, porque um alvo diferente da
+  ativa ja implica que a ativa esta pior. Cota ilegivel nunca escapa.
+- O predicado de cooldown mora em `ccx.py` e os dois `check_once` o chamam. Nao
+  duplicar: era copia colada nos dois modulos e so um dos lados seria corrigido.
+- Faixas de poll sao por provedor (`ccx.PollBands`). O modulo Codex passa as suas
+  em `BANDS` porque la o rotulo "5h" e posicional e costuma carregar a janela
+  semanal, que nao se move dentro de uma sessao; herdar a faixa apertada do
+  Claude prenderia o poll no ritmo rapido por dias.
+- Toda troca registra o snapshot da decisao no `auto.log` via o `reason` do
+  `do_switch`. Percentual e numero de slot podem entrar; token, e-mail e payload
+  nao.
 - `pinned_slot` e uma trava de operador, nao uma preferencia. Quando existe,
   `check_once` sai antes de qualquer coleta: fixar uma conta nao pode gerar
   trafego de usage. E o `do_switch(..., only_if_pinned=True)` revalida a

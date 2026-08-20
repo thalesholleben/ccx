@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest.mock as mock
 from contextlib import nullcontext, redirect_stdout
 from datetime import datetime, timedelta, timezone
@@ -113,19 +114,23 @@ def test_next_wake_com_duas_utilizaveis():
     limpo = {"1": "", "2": ""}
     folgada = {"1": usage(30, 40, 100), "2": usage(20, 20, 100)}
     apertada = {"1": usage(75, 40, 100), "2": usage(20, 20, 100)}
+    larga, apertadinha = ccx.POLL_WIDE, ccx.POLL_TIGHT
+    # as faixas vem das constantes: calibrar o poll nao pode quebrar este teste,
+    # o que ele afirma e QUAL faixa se aplica, nao quantos segundos ela tem.
+    assert folgada["1"]["5h"]["pct"] < ccx.POLL_TIGHTEN_AT <= apertada["1"]["5h"]["pct"]
     # faixa larga enquanto a ativa esta folgada
     for _ in range(30):
-        assert 180 <= ccx.next_wake(folgada, limpo, "1") <= 240
-    # aperta quando a ATIVA passa de 70, mesmo com a outra folgada
+        assert larga[0] <= ccx.next_wake(folgada, limpo, "1") <= larga[1]
+    # aperta quando a ATIVA passa do TIGHTEN_AT, mesmo com a outra folgada
     for _ in range(30):
-        assert 100 <= ccx.next_wake(apertada, limpo, "1") <= 120
+        assert apertadinha[0] <= ccx.next_wake(apertada, limpo, "1") <= apertadinha[1]
     # a referencia e a ativa: ativa folgada com a outra em 75 segue largo
     for _ in range(30):
-        assert 180 <= ccx.next_wake(apertada, limpo, "2") <= 240
+        assert larga[0] <= ccx.next_wake(apertada, limpo, "2") <= larga[1]
     # semanal alto NAO aperta o poll: ele nao se move dentro da sessao
     alto7d = {"1": usage(37, 97, 48), "2": usage(20, 20, 100)}
     for _ in range(30):
-        assert 180 <= ccx.next_wake(alto7d, limpo, "1") <= 240
+        assert larga[0] <= ccx.next_wake(alto7d, limpo, "1") <= larga[1]
     # erro em qualquer conta derruba para largo, para nao insistir num 429
     for _ in range(30):
         assert 180 <= ccx.next_wake(apertada, {"1": "HTTP 429", "2": ""}, "1") <= 240
@@ -235,6 +240,108 @@ def test_status_nao_confunde_erro_de_usage_com_conta_esgotada():
         assert "monitor mantem o slot 3" in texto
 
 
+def test_cooldown_nao_prende_em_conta_esgotada():
+    """A cicatriz de 19/08/2026: cooldown segurando o monitor numa conta em 100%.
+
+    O cooldown protege contra pingue-pongue entre contas de folga parecida. Ele
+    nao tem por que existir quando a ativa ja nao atende: voltar para uma conta
+    em 100% nao e um risco.
+    """
+    cotas = {"1": usage(5, 5, 100), "2": usage(100, 40, 100)}
+    # ativa em 100%, cooldown mal comecou (esperou 1s de 300)
+    assert ccx.cooldown_blocks(cotas, "2", 1, 300) is False
+    # a mesma ativa saudavel: o cooldown continua valendo
+    saudaveis = {"1": usage(5, 5, 100), "2": usage(70, 40, 100)}
+    assert ccx.cooldown_blocks(saudaveis, "2", 1, 300) is True
+    # cooldown ja cumprido: libera de qualquer jeito
+    assert ccx.cooldown_blocks(saudaveis, "2", 301, 300) is False
+    # 99% ainda nao e esgotamento: o limiar cuida disso, nao o escape
+    quase = {"1": usage(5, 5, 100), "2": usage(99, 40, 100)}
+    assert ccx.cooldown_blocks(quase, "2", 1, 300) is True
+    # semanal em 100 tambem trava a conta, nao so o 5h
+    semanal = {"1": usage(5, 5, 100), "2": usage(10, 100, 100)}
+    assert ccx.cooldown_blocks(semanal, "2", 1, 300) is False
+    # cota ilegivel NAO escapa: erro de medicao nao prova esgotamento
+    assert ccx.cooldown_blocks({"1": usage(5, 5, 100), "2": None}, "2", 1, 300) is True
+    # sem ativa conhecida tambem nao escapa
+    assert ccx.cooldown_blocks(cotas, None, 1, 300) is True
+
+
+def test_check_once_troca_na_hora_quando_a_ativa_esgotou():
+    """O escape tem que valer no caminho real, nao so no predicado."""
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": time.time(),  # cooldown recem-iniciado
+    }
+    cotas = {"1": usage(5, 5, 100), "2": usage(100, 40, 100)}
+    args = SimpleNamespace(threshold=60, strategy="consume-first", poll=60, cooldown=300)
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(ccx, "collect", return_value=(cotas, {"1": "", "2": ""}, "2")),
+        mock.patch.object(ccx, "do_switch") as switch,
+    ):
+        with redirect_stdout(StringIO()):
+            codigo, _ = ccx.check_once(args)
+    assert codigo == 0, "deveria ter trocado apesar do cooldown"
+    assert switch.call_args.args[1] == "1"
+    assert switch.call_args.kwargs["reason"].startswith("ativa esgotada; ")
+
+
+def test_check_once_respeita_cooldown_com_ativa_saudavel():
+    """O escape nao pode virar bypass geral, senao volta o pingue-pongue."""
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": time.time(),
+    }
+    cotas = {"1": usage(5, 5, 100), "2": usage(40, 40, 100)}
+    args = SimpleNamespace(threshold=60, strategy="consume-first", poll=60, cooldown=300)
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(ccx, "collect", return_value=(cotas, {"1": "", "2": ""}, "2")),
+        mock.patch.object(ccx, "do_switch") as switch,
+    ):
+        with redirect_stdout(StringIO()):
+            codigo, _ = ccx.check_once(args)
+    assert codigo == 2
+    switch.assert_not_called()
+
+
+def test_auto_log_grava_snapshot_sem_vazar_segredo():
+    """Sem o snapshot, o post-mortem nao distingue 'tinha folga' de 'menos pior'.
+
+    Foi o que faltou em 19/08/2026. O que entra no log e percentual e numero de
+    slot; token, e-mail e payload nunca.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        original = ccx.STORE
+        ccx.STORE = Path(tmp) / "accounts.json"
+        try:
+            slot = {
+                "email": "segredo@x.com",
+                "oauth": {"accessToken": "TOKEN-SECRETO", "refreshToken": "RT-SECRETO"},
+                "account": {"emailAddress": "segredo@x.com"},
+                "org_uuid": "org",
+            }
+            store = {"slots": {"1": slot}, "last_switch": 0}
+            ccx.write_json(ccx.STORE, store)
+            with (
+                mock.patch.object(ccx, "apply_slot"),
+                mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+            ):
+                for motivo in ("ativa esgotada; 1:5.0%/5.0%", "manual", "fixacao", ""):
+                    with redirect_stdout(StringIO()):
+                        ccx.do_switch(dict(store), "1", reason=motivo)
+            log = (Path(tmp) / "auto.log").read_text(encoding="utf-8")
+        finally:
+            ccx.STORE = original
+    assert "ativa esgotada; 1:5.0%/5.0%" in log
+    assert "manual" in log and "fixacao" in log
+    # troca sem motivo continua registrada, so sem o sufixo
+    assert log.count("troca para o slot 1") == 4
+    for segredo in ("TOKEN-SECRETO", "RT-SECRETO", "segredo@x.com"):
+        assert segredo not in log, f"{segredo} vazou no auto.log"
+
+
 def test_check_once_mantem_ativa_em_qualquer_erro_de_usage():
     store = {
         "slots": {
@@ -281,7 +388,10 @@ def test_check_once_troca_com_429_se_a_ativa_ja_foi_confirmada_esgotada():
         mock.patch.object(ccx, "do_switch") as switch,
     ):
         assert ccx.check_once(args) == (0, 60.0)
-    switch.assert_called_once_with(store, "2")
+    switch.assert_called_once()
+    assert switch.call_args.args == (store, "2")
+    # O motivo carrega o snapshot da decisao; o formato exato e do check_once.
+    assert switch.call_args.kwargs["reason"].startswith("limiar; ")
 
 
 def test_check_once_respeita_slot_fixado_sem_consultar_cota():
@@ -298,7 +408,7 @@ def test_check_once_respeita_slot_fixado_sem_consultar_cota():
     ):
         assert ccx.check_once(args) == (0, ccx.PINNED_CHECK_S)
     collect.assert_not_called()
-    switch.assert_called_once_with(store, "2", only_if_pinned=True)
+    switch.assert_called_once_with(store, "2", only_if_pinned=True, reason="fixacao")
 
 
 def test_configure_pin_persiste_e_pode_ser_removido():

@@ -90,13 +90,13 @@ Flags globais, válidas em qualquer subcomando:
 | Flag | Padrão | Efeito |
 | --- | --- | --- |
 | `--strategy consume-first\|best` | `consume-first` | Ver [Estratégias](#estratégias-de-troca) |
-| `--threshold N` | `80` | Percentual em que a conta deixa de ser candidata |
+| `--threshold N` | `60` | Percentual em que a conta deixa de ser candidata |
 
 Flags do `auto`:
 
 | Flag | Padrão | Efeito |
 | --- | --- | --- |
-| `--cooldown N` | `300` | Segundos mínimos entre duas trocas, evita pingue-pongue |
+| `--cooldown N` | `120` | Segundos mínimos entre duas trocas, evita pingue-pongue. Não se aplica quando a conta ativa já está em 100%, ver [Estratégias](#estratégias-de-troca) |
 | `--poll N` | `0` | Força intervalo fixo em segundos. `0` usa o dinâmico |
 | `--once` | | Uma checagem só e sai, para uso em agendador |
 | `--pin N\|off` | | Fixa o slot `N` e suspende a rotação; `off` a libera novamente |
@@ -163,6 +163,13 @@ do dono: PID reciclado é tratado como processo morto sem esperar o timeout, enq
 um processo apenas suspenso não ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
 encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
+
+Cada troca vai para o log **com o snapshot que a justificou**, no formato
+`troca para o slot 4 (ativa esgotada; 1:100.0%/26.0%  2:86.0%/67.0%  ...)`. O motivo é
+`limiar`, `ativa esgotada`, `manual` ou `fixacao`. Sem isso o log só diz o destino, e
+um post-mortem não consegue distinguir "escolheu uma conta com folga" de "escolheu a
+menos pior": foi exatamente o que faltou para fechar o diagnóstico de 19/08/2026. O que
+entra ali é percentual e número de slot, nunca token, e-mail ou payload.
 O watchdog usa `pythonw.exe`, portanto não abre uma janela de terminal a cada minuto.
 Antes de registrar a tarefa, o instalador rejeita o alias da Microsoft Store e
 confirma um executável Python 3.10+ real. Se o monitor terminar no primeiro
@@ -211,6 +218,35 @@ fazer e ele avisa.
 Conta com cota desconhecida (erro de rede, token morto) nunca é escolhida
 automaticamente, mas segue sendo alvo válido de um `switch` explícito.
 
+### O cooldown não vale para conta esgotada
+
+O cooldown existe contra pingue-pongue: duas contas de folga parecida ficariam
+trocando de lugar a cada checagem, e cada troca reescreve credencial. Nada disso se
+aplica quando a conta **ativa** já bateu 100%: ela não atende mais, e voltar para ela
+não é um risco que precise ser evitado. Nesse caso a troca sai na hora.
+
+**Isto é cicatriz, não zelo teórico.** Em 19/08/2026, com limiar 80 e cooldown 300,
+uma frota de agents paralelos levou a conta ativa de candidata a 100% em menos de 4
+minutos, cerca de 5 pontos por minuto. Os 20 pontos de folga que o limiar comprava
+valiam uns 240s, menos que os 300s de cooldown. A conta morria **dentro** da trava e o
+monitor ficava proibido de sair dela.
+
+Daí a regra para mexer nesses dois números, que são calibrados juntos:
+
+```
+(100 - threshold) / burn_rate  >>  cooldown + maior POLL_TIGHT
+```
+
+Com os valores de hoje: 40 pontos a 5 pts/min dão 480s, contra 120 + 60 = 180s. Baixar
+o limiar sem olhar o cooldown, ou aumentar o cooldown sem olhar o limiar, recria o
+travamento.
+
+O critério do escape é 100%, não o limiar. Escapar sempre que a ativa passa do limiar
+equivaleria a remover o cooldown, porque um alvo diferente da ativa já implica que a
+ativa está pior. O limiar serve para trocar **antes** de bater; o escape serve para não
+ficar preso **depois** de bater. Cota ilegível não escapa: erro de medição, inclusive
+429, não prova esgotamento.
+
 Um erro ao medir a **conta ativa**, inclusive `HTTP 429`, não prova que uma chamada
 ao modelo esgotou a cota. Sem leitura anterior confiável, o monitor mantém a conta
 atual. Se ela foi confirmada como esgotada nos últimos 5 minutos e a releitura deu
@@ -223,7 +259,12 @@ Polling só serve para decidir uma troca, e decisão de troca exige **duas conta
 utilizáveis**. Todo o intervalo sai dessa observação:
 
 **Duas ou mais utilizáveis:** faixa com jitter, 180 a 240s normalmente, apertando
-para 100 a 120s quando a janela de **5h da conta ativa** passa de 70%.
+para 45 a 60s quando a janela de **5h da conta ativa** passa de 50%.
+
+O ponto de aperto fica **abaixo** do limiar de troca de propósito. Apertar o poll
+depois de já ter cruzado o ponto de troca não serve para nada, a decisão já passou.
+O módulo Codex usa faixas próprias (`ccx_codex.BANDS`), porque lá a janela primária
+costuma ser a semanal, que não se move dentro de uma sessão.
 
 O gatilho é o 5h de propósito. É a única janela que se move rápido dentro de uma
 sessão. O semanal sobe devagar e leva dias para resetar, então usá-lo aqui

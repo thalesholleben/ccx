@@ -31,6 +31,7 @@ import urllib.request
 from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
@@ -44,17 +45,43 @@ LOCK_TOUCH_S = 3.0
 LOCK_TIMEOUT_S = 9.0
 REFRESH_SKEW_MS = 5 * 60 * 1000
 
-DEFAULT_THRESHOLD = 80.0
-DEFAULT_COOLDOWN_S = 300
+# Limiar e cooldown sao calibrados juntos, senao o cooldown sobrevive a folga que
+# o limiar compra e o monitor fica preso numa conta esgotada.
+#
+# Cicatriz de 19/08/2026: com limiar 80 e cooldown 300, uma frota de agents
+# paralelos queimou ~20 pontos da janela de 5h em menos de 4 minutos (~5 pts/min).
+# A folga de 20 pontos valia ~240s, menos que os 300s de cooldown, entao a conta
+# batia 100% ainda dentro da trava e nao havia como sair. Deterministico, nao azar.
+#
+# Regra para mexer nestes numeros: (100 - THRESHOLD) / 5 pts/min tem que ser
+# folgadamente maior que COOLDOWN + o maior POLL_TIGHT. Hoje: 40 pontos = 480s,
+# contra 120 + 60 = 180s.
+DEFAULT_THRESHOLD = 60.0
+DEFAULT_COOLDOWN_S = 120
 PINNED_CHECK_S = 60.0
 FAR_FUTURE = datetime(9999, 1, 1, tzinfo=timezone.utc)
 
 # Intervalo de poll dinamico. Cota sobe devagar, entao checar de minuto em minuto
 # com a conta folgada e so trafego. Aperta quando a conta ativa passa de
 # TIGHTEN_AT. O jitter tambem evita um batimento perfeitamente periodico.
+#
+# TIGHTEN_AT fica ABAIXO do limiar de proposito: apertar o poll depois de ja ter
+# cruzado o ponto de troca nao serve para nada, a decisao ja passou.
 POLL_WIDE = (180.0, 240.0)
-POLL_TIGHT = (100.0, 120.0)
-POLL_TIGHTEN_AT = 70.0
+POLL_TIGHT = (45.0, 60.0)
+POLL_TIGHTEN_AT = 50.0
+
+
+class PollBands(NamedTuple):
+    """Faixas de poll de um provedor. Ver `band_delay`."""
+
+    wide: tuple[float, float]
+    tight: tuple[float, float]
+    tighten_at: float
+
+
+DEFAULT_BANDS = PollBands(POLL_WIDE, POLL_TIGHT, POLL_TIGHTEN_AT)
+
 # Todos os processos (monitor, hook e status) compartilham este cache em disco.
 # Os TTLs ficam abaixo do menor poll para amortecer rajadas sem atrasar o monitor.
 USAGE_CACHE_TTL_S = 30.0
@@ -767,6 +794,39 @@ def pick_target(
     return ranked[0][0]
 
 
+def cooldown_blocks(
+    usage_map: dict[str, dict | None],
+    active: str | None,
+    waited: float,
+    cooldown: float,
+) -> bool:
+    """A troca deve esperar o cooldown, ou pode sair agora?
+
+    O cooldown existe contra pingue-pongue: duas contas de folga parecida ficam
+    trocando de lugar a cada checagem e cada troca reescreve credencial. Nada
+    disso se aplica quando a conta ATIVA ja bateu 100%: ela nao atende mais, e
+    voltar para ela nao e um risco que precise ser evitado.
+
+    Sem esta excecao o cooldown vira armadilha. Em 19/08/2026 uma frota de
+    agents levou a conta ativa de candidata a 100% em menos de 4 minutos, dentro
+    de um cooldown de 5, e o monitor ficou proibido de sair de uma conta morta.
+
+    O criterio e 100%, nao o limiar. Escapar sempre que a ativa passa do limiar
+    equivaleria a remover o cooldown, porque um alvo diferente da ativa ja
+    implica que a ativa esta pior. O limiar serve para trocar ANTES de bater; o
+    escape serve para nao ficar preso DEPOIS de bater.
+
+    Cota ilegivel nao escapa: erro de medicao, inclusive 429, nao prova
+    esgotamento. Esse caso ja e tratado por `hold_active_on_unknown_usage`.
+    """
+    if waited >= cooldown:
+        return False
+    usage = usage_map.get(active) if active else None
+    if usage is not None and utilization(usage) >= 100:
+        return False
+    return True
+
+
 def hold_active_on_unknown_usage(
     store: dict,
     usage_map: dict[str, dict | None],
@@ -846,13 +906,23 @@ def available_at(usage: dict) -> datetime | None:
     return max(parse_reset(w.get("resets_at")) for w in blocked)
 
 
-def band_delay(usage_map: dict[str, dict | None], active: str | None) -> float:
+def band_delay(
+    usage_map: dict[str, dict | None],
+    active: str | None,
+    bands: PollBands | None = None,
+) -> float:
     """Faixa de poll com jitter, guiada pela janela de 5h da conta ativa.
 
     O 5h e a unica que se move rapido dentro de uma sessao. O semanal sobe
     devagar e leva dias para resetar, entao usa-lo aqui prenderia o poll na
     faixa apertada por dias inteiros sem que nada estivesse por acontecer.
+
+    `bands` existe porque o modulo Codex reusa esta engine com janelas de outra
+    natureza: la o rotulo "5h" e so posicional e costuma carregar a janela
+    semanal, que nao se move rapido. Aplicar a faixa apertada do Claude naquele
+    caso e exatamente o defeito descrito no paragrafo acima.
     """
+    bands = bands or DEFAULT_BANDS
     ref = usage_map.get(active) if active else None
     if not ref:
         ref = max(
@@ -864,11 +934,14 @@ def band_delay(usage_map: dict[str, dict | None], active: str | None) -> float:
         util = ref["5h"]["pct"]
     else:
         util = utilization(ref) if ref else 0.0
-    return random.uniform(*(POLL_TIGHT if util >= POLL_TIGHTEN_AT else POLL_WIDE))
+    return random.uniform(*(bands.tight if util >= bands.tighten_at else bands.wide))
 
 
 def next_wake(
-    usage_map: dict[str, dict | None], err_map: dict[str, str], active: str | None
+    usage_map: dict[str, dict | None],
+    err_map: dict[str, str],
+    active: str | None,
+    bands: PollBands | None = None,
 ) -> float:
     """Segundos ate a proxima checagem.
 
@@ -879,15 +952,16 @@ def next_wake(
     Erro em qualquer conta cai para a faixa larga: se o endpoint esta empurrando
     de volta, insistir de 100 em 100s so piora.
     """
+    bands = bands or DEFAULT_BANDS
     if any(err_map.values()):
-        return random.uniform(*POLL_WIDE)
+        return random.uniform(*bands.wide)
     known = [u for u in usage_map.values() if u]
     returns = [available_at(u) for u in known]
     if sum(1 for t in returns if t is None) >= 2:
-        return band_delay(usage_map, active)
+        return band_delay(usage_map, active, bands)
     pending = [t for t in returns if t is not None]
     if not pending:
-        return random.uniform(*POLL_WIDE)
+        return random.uniform(*bands.wide)
     secs = (min(pending) - datetime.now(timezone.utc)).total_seconds()
     return max(SLEEP_FLOOR_S, min(secs + SLEEP_MARGIN_S, SLEEP_CAP_S))
 
@@ -995,7 +1069,13 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return 0 if 0 in (claude_code, codex_code) else 1
 
 
-def do_switch(store: dict, key: str, *, only_if_pinned: bool = False) -> bool:
+def do_switch(
+    store: dict,
+    key: str,
+    *,
+    only_if_pinned: bool = False,
+    reason: str = "",
+) -> bool:
     with store_lock():
         # A coleta soltou este lock antes de chegar aqui. Releia o store para
         # nao sobrescrever cache ou refresh token que outro hook gravou nesse
@@ -1013,7 +1093,11 @@ def do_switch(store: dict, key: str, *, only_if_pinned: bool = False) -> bool:
         store.clear()
         store.update(fresh)
     print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
-    auto_event(f"troca para o slot {key}")
+    # O snapshot da decisao vai junto porque sem ele o log so diz o destino, e um
+    # post-mortem nao consegue distinguir "escolheu uma conta com folga" de
+    # "escolheu a menos pior". Foi exatamente o que faltou em 19/08/2026.
+    # Sao percentuais e numeros de slot: nunca token, e-mail ou payload.
+    auto_event(f"troca para o slot {key}" + (f" ({reason})" if reason else ""))
     return True
 
 
@@ -1031,7 +1115,7 @@ def cmd_switch(args: argparse.Namespace) -> int:
     else:
         active = active_slot(store)
         target = keys[(keys.index(active) + 1) % len(keys)] if active else keys[0]
-    do_switch(store, target)
+    do_switch(store, target, reason="manual")
     return 0
 
 
@@ -1062,7 +1146,7 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
             print(f"[{stamp}] slot {pinned} fixado")
             return 2, PINNED_CHECK_S
         print(f"[{stamp}] fixação troca {active} -> {pinned}")
-        if do_switch(store, pinned, only_if_pinned=True):
+        if do_switch(store, pinned, only_if_pinned=True, reason="fixacao"):
             return 0, PINNED_CHECK_S
         return 2, PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
@@ -1093,11 +1177,12 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         print(f"[{stamp}] {line}  ok{tail}{nxt}")
         return 2, delay
     waited = time.time() - store["last_switch"]
-    if waited < args.cooldown:
+    if cooldown_blocks(usage_map, active, waited, args.cooldown):
         print(f"[{stamp}] {line}  cooldown {int(args.cooldown - waited)}s{tail}")
         return 2, min(delay, args.cooldown - waited + 1)
+    motivo = "ativa esgotada" if waited < args.cooldown else "limiar"
     print(f"[{stamp}] {line}  trocando {active} -> {target}{tail}")
-    do_switch(store, target)
+    do_switch(store, target, reason=f"{motivo}; {line}")
     return 0, delay
 
 
@@ -1109,7 +1194,7 @@ def cmd_auto(args: argparse.Namespace) -> int:
             if pinned:
                 print(f"slot {pinned} fixado")
                 if not already_active:
-                    do_switch(load_store(), pinned, only_if_pinned=True)
+                    do_switch(load_store(), pinned, only_if_pinned=True, reason="fixacao")
             else:
                 print("fixação removida; a rotação automática foi liberada")
         store = load_store()
@@ -1136,7 +1221,11 @@ def cmd_auto(args: argparse.Namespace) -> int:
         auto_event(f"monitor nao iniciou ({type(exc).__name__})")
         raise
 
-    faixa = "dinamico 100-240s" if not args.poll else f"fixo {args.poll}s"
+    faixa = (
+        f"dinamico {int(DEFAULT_BANDS.tight[0])}-{int(DEFAULT_BANDS.wide[1])}s"
+        if not args.poll
+        else f"fixo {args.poll}s"
+    )
     print(
         f"ccx auto: {args.strategy}, limiar {args.threshold}%, poll {faixa}. "
         "Ctrl+C para sair."

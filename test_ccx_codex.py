@@ -279,7 +279,10 @@ def test_check_once_codex_troca_com_429_apos_confirmacao_recente():
         mock.patch.object(ccx_codex, "do_switch") as switch,
     ):
         assert ccx_codex.check_once(args) == (0, 60.0)
-    switch.assert_called_once_with(store, "2")
+    switch.assert_called_once()
+    assert switch.call_args.args == (store, "2")
+    # O motivo carrega o snapshot da decisao; o formato exato e do check_once.
+    assert switch.call_args.kwargs["reason"].startswith("limiar; ")
 
 
 def test_check_once_codex_respeita_slot_fixado_sem_consultar_cota():
@@ -296,7 +299,7 @@ def test_check_once_codex_respeita_slot_fixado_sem_consultar_cota():
     ):
         assert ccx_codex.check_once(args) == (0, ccx.PINNED_CHECK_S)
     collect.assert_not_called()
-    switch.assert_called_once_with(store, "2", only_if_pinned=True)
+    switch.assert_called_once_with(store, "2", only_if_pinned=True, reason="fixacao")
 
 
 def test_collect_codex_reusa_o_cache_compartilhado():
