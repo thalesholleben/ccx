@@ -368,10 +368,19 @@ def test_do_switch_codex_rele_store_e_preserva_estado_concorrente():
         mock.patch.object(ccx_codex, "load_store", return_value=fresh),
         mock.patch.object(ccx_codex, "apply_slot") as apply,
         mock.patch.object(ccx, "write_json") as write,
+        # auto_event escreve com open() direto, entao NAO passa pelo write_json
+        # mockado acima: sem este patch o teste sujaria o ~/.ccx/auto.log real
+        # com uma troca que nunca aconteceu.
+        mock.patch.object(ccx, "auto_event") as log,
         mock.patch.object(ccx.time, "time", return_value=500.0),
     ):
-        ccx_codex.do_switch(stale, "1")
+        ccx_codex.do_switch(stale, "1", reason="limiar; 1*:9.0%/9.0%")
 
+    log.assert_called_once()
+    registrado = log.call_args.args[0]
+    assert registrado.startswith("codex: troca para o slot 1")
+    assert "limiar; 1*:9.0%/9.0%" in registrado
+    assert "novo" not in registrado, "token/identidade vazou no log"
     apply.assert_called_once_with(fresh["slots"]["1"])
     write.assert_called_once_with(ccx_codex.STORE, fresh)
     assert stale == fresh
