@@ -53,11 +53,16 @@ REFRESH_SKEW_MS = 5 * 60 * 1000
 # A folga de 20 pontos valia ~240s, menos que os 300s de cooldown, entao a conta
 # batia 100% ainda dentro da trava e nao havia como sair. Deterministico, nao azar.
 #
-# Regra para mexer nestes numeros: (100 - THRESHOLD) / 5 pts/min tem que ser
-# folgadamente maior que COOLDOWN + o maior POLL_TIGHT. Hoje: 40 pontos = 480s,
-# contra 120 + 60 = 180s.
+# Defaults compartilhados pelo modulo Codex. O Claude tem valores proprios
+# abaixo para antecipar a rotacao sem alterar o comportamento do Codex.
 DEFAULT_THRESHOLD = 60.0
 DEFAULT_COOLDOWN_S = 120
+
+# Regra para mexer nestes numeros: (100 - THRESHOLD) / 5 pts/min tem que ser
+# maior que COOLDOWN + o maior POLL_TIGHT. Hoje: 20 pontos = 240s,
+# contra 60 + 60 = 120s.
+CLAUDE_DEFAULT_THRESHOLD = 80.0
+CLAUDE_DEFAULT_COOLDOWN_S = 60
 PINNED_CHECK_S = 60.0
 FAR_FUTURE = datetime(9999, 1, 1, tzinfo=timezone.utc)
 
@@ -81,6 +86,7 @@ class PollBands(NamedTuple):
 
 
 DEFAULT_BANDS = PollBands(POLL_WIDE, POLL_TIGHT, POLL_TIGHTEN_AT)
+CONSUME_FIRST_NEAR_PCT = 5.0
 
 # Todos os processos (monitor, hook e status) compartilham este cache em disco.
 # Os TTLs ficam abaixo do menor poll para amortecer rajadas sem atrasar o monitor.
@@ -452,7 +458,15 @@ def http_json(req: urllib.request.Request, timeout: float = 10.0) -> dict:
 
 
 def fetch_usage(token: str) -> dict:
-    """5h e 7d da conta. Levanta em erro: quem chama decide o que fazer."""
+    """Janelas gerais e o limite semanal mais restritivo por modelo.
+
+    O endpoint tambem devolve ``limits`` com entradas ``weekly_scoped``. Elas
+    podem esgotar um modelo antes da janela semanal geral, exatamente o caso em
+    que trocar tarde deixa uma sessao batendo no limite apesar de o 5h/7d ainda
+    parecerem utilizaveis. Conservamos somente a mais alta: o seletor nao sabe
+    qual modelo a sessao vai pedir, portanto e mais seguro nao eleger uma conta
+    que ja bloqueou qualquer modelo semanalmente limitado.
+    """
     req = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -470,6 +484,27 @@ def fetch_usage(token: str) -> dict:
                 "pct": float(win["utilization"]),
                 "resets_at": win.get("resets_at"),
             }
+    scoped = []
+    for limit in raw.get("limits", []):
+        if not isinstance(limit, dict) or limit.get("kind") != "weekly_scoped":
+            continue
+        try:
+            raw_pct = limit.get("percent", limit.get("utilization"))
+            pct = float(raw_pct)
+        except (KeyError, TypeError, ValueError):
+            continue
+        scope = limit.get("scope")
+        model = scope.get("model") if isinstance(scope, dict) else None
+        name = model.get("display_name") if isinstance(model, dict) else None
+        scoped.append((pct, limit.get("resets_at"), name))
+    if scoped:
+        # Em empate de percentual, a janela que libera por ultimo e a
+        # restricao real. Depender da ordem do payload pode anunciar a conta
+        # como disponivel antes de todos os limites por modelo liberarem.
+        pct, resets_at, name = max(
+            scoped, key=lambda item: (item[0], parse_reset(item[1]))
+        )
+        out["modelo"] = {"pct": pct, "resets_at": resets_at, "name": name}
     if not out:
         # Resposta 200 sem nenhuma janela reconhecida. Devolver {} faria
         # utilization() responder 0.0, e a conta seria eleita como a mais
@@ -595,6 +630,32 @@ def remember_slot_usage(
         "error": error,
         "known_at": known_at,
     }
+
+
+def inactive_slot_usage(store: dict, key: str, now: float) -> dict | None:
+    """Ultima cota confiavel de uma conta que nao esta sendo usada.
+
+    Uma conta inativa nao consome cota. Logo sua ultima leitura continua valida,
+    salvo por janelas cujo reset ja passou; essas voltam localmente para zero.
+    O timestamp de coleta nao e renovado, para a conta ser consultada assim que
+    voltar a ser ativa.
+    """
+    entry = store.get("usage_cache", {}).get(key)
+    if not isinstance(entry, dict) or not isinstance(entry.get("usage"), dict):
+        return None
+    current = datetime.fromtimestamp(now, timezone.utc)
+    projected = {}
+    for label, window in entry["usage"].items():
+        if not isinstance(window, dict):
+            continue
+        projected_window = dict(window)
+        resets_at = projected_window.get("resets_at")
+        if resets_at and parse_reset(resets_at) <= current:
+            projected_window["pct"] = 0.0
+        projected[label] = projected_window
+    entry["usage"] = projected
+    entry["inactive"] = True
+    return projected
 
 
 def live_identity() -> tuple[dict, dict, str]:
@@ -753,14 +814,14 @@ def parse_reset(value: str | None) -> datetime:
 
 
 def utilization(usage: dict) -> float:
-    """A janela que aperta: quem bloqueia e a mais alta das duas."""
+    """A janela que aperta: geral ou semanal por modelo."""
     return max((w["pct"] for w in usage.values()), default=0.0)
 
 
 def pick_target(
     usage_map: dict[str, dict | None], threshold: float, strategy: str
 ) -> str | None:
-    """Slot que deveria estar ativo agora, ou None se nenhum tem folga.
+    """Slot que deveria estar ativo agora, ou None sem nenhuma cota conhecida.
 
     consume-first: entre os que tem folga, o de reset semanal mais proximo,
     porque cota semanal e pereciva. best: o de maior folga.
@@ -769,9 +830,9 @@ def pick_target(
     Quando ninguem esta abaixo do limiar, cai para a menos pior que ainda nao
     esta travada (util < 100). O limiar existe para trocar ANTES de bater; nao
     serve de motivo para deixar voce parado numa conta travada tendo outra que
-    ainda atende.
+    ainda atende. Se todas estiverem travadas, estaciona na que libera primeiro.
     """
-    under, spare = [], []
+    under, spare, blocked = [], [], []
     for key, usage in usage_map.items():
         if usage is None:
             continue
@@ -780,18 +841,40 @@ def pick_target(
         if util >= threshold:
             if util < 100:
                 spare.append((key, util, weekly))
+            else:
+                blocked.append((key, available_at(usage), weekly))
             continue
         under.append((key, util, weekly))
     ranked = under or spare
     if not ranked:
-        return None
+        if not blocked:
+            return None
+        blocked.sort(key=lambda item: (item[1], item[2], item[0]))
+        return blocked[0][0]
     if strategy == "consume-first" and under:
         ranked.sort(key=lambda r: (r[2], r[1]))
+    elif strategy == "consume-first":
+        lowest = min(item[1] for item in spare)
+        ranked = [
+            item
+            for item in spare
+            if item[1] - lowest < CONSUME_FIRST_NEAR_PCT
+        ]
+        ranked.sort(key=lambda r: (r[2], r[1], r[0]))
     else:
         # No fallback a folga e o que importa: reset semanal proximo nao ajuda
         # quem ja nao tem cota para gastar.
-        ranked.sort(key=lambda r: r[1])
+        ranked.sort(key=lambda r: (r[1], r[0]))
     return ranked[0][0]
+
+
+def all_known_usage_blocked(usage_map: dict[str, dict | None]) -> bool:
+    known = [usage for usage in usage_map.values() if usage is not None]
+    return (
+        len(known) == len(usage_map)
+        and bool(known)
+        and all(utilization(usage) >= 100 for usage in known)
+    )
 
 
 def cooldown_blocks(
@@ -883,10 +966,44 @@ def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | 
         now = time.time()
         changed = False
         for key, slot in store["slots"].items():
-            cached = cached_slot_usage(store, key, now)
+            is_active = key == active
+            entry = store.get("usage_cache", {}).get(key, {})
+            previous_usage = entry.get("usage")
+            was_marked_inactive = entry.get("inactive") is True
+            inactive = (
+                inactive_slot_usage(store, key, now)
+                if not is_active and not slot.get("dead")
+                else None
+            )
+            if inactive is not None:
+                usage_map[key], err_map[key] = inactive, ""
+                changed |= not was_marked_inactive or inactive != previous_usage
+                continue
+            # Uma leitura feita enquanto inativa precisa ser renovada assim que
+            # a conta entra em uso, mesmo que tenha poucos segundos.
+            cached = (
+                None
+                if is_active and entry.get("inactive", True)
+                else cached_slot_usage(store, key, now)
+            )
             if cached is None:
-                cached = slot_usage(key, slot, key == active, store)
+                was_inactive = bool(entry.get("inactive"))
+                inactive_snapshot = entry.get("usage") if was_inactive else None
+                cached = slot_usage(key, slot, is_active, store)
                 remember_slot_usage(store, key, *cached, now)
+                refreshed = store["usage_cache"][key]
+                if (
+                    is_active
+                    and cached[0] is None
+                    and cached[1] == "HTTP 429"
+                    and isinstance(inactive_snapshot, dict)
+                ):
+                    # No instante da ativacao o snapshot inativo ainda era
+                    # confiavel. Um 429 nao pode apaga-lo imediatamente.
+                    refreshed["usage"] = inactive_snapshot
+                    refreshed["known_at"] = now
+                    cached = inactive_snapshot, cached[1]
+                refreshed["inactive"] = not is_active
                 changed = True
             usage_map[key], err_map[key] = cached
         if changed:
@@ -897,8 +1014,8 @@ def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | 
 def available_at(usage: dict) -> datetime | None:
     """Quando a conta volta a poder atender, ou None se ja pode agora.
 
-    Travada e a janela em 100%. Precisa das duas abaixo de 100 para atender,
-    entao quem manda e o reset mais TARDE entre as travadas.
+    Travada e a janela em 100%. Precisa de todas as janelas, inclusive a do
+    modelo, abaixo de 100 para atender. Quem manda e o reset mais tarde.
     """
     blocked = [w for w in usage.values() if w["pct"] >= 100]
     if not blocked:
@@ -1021,24 +1138,32 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("Nenhuma conta. Logue no Claude Code e rode 'ccx add'.")
         return 1
     usage_map, err_map, active = collect(store)
-    print(f"{'':2} {'conta':28} {'5h':>6} {'reset':>7} {'7d':>6} {'reset':>7}")
+    print(
+        f"{'':2} {'conta':28} {'uso 5h':>7} {'reset 5h':>9} "
+        f"{'uso 7d':>7} {'reset 7d':>9} {'uso mod':>7} {'reset mod':>9}"
+    )
     for key, slot in store["slots"].items():
         usage = usage_map[key]
         mark = "*" if key == active else " "
         tag = f"  {err_map[key]}" if err_map[key] else ""
         print(
             f"{mark}{key} {slot['email'][:28]:28} "
-            f"{fmt_window(usage, '5h')} {fmt_reset(usage, '5h'):>7} "
-            f"{fmt_window(usage, '7d')} {fmt_reset(usage, '7d'):>7}{tag}"
+            f"{fmt_window(usage, '5h'):>7} {fmt_reset(usage, '5h'):>9} "
+            f"{fmt_window(usage, '7d'):>7} {fmt_reset(usage, '7d'):>9} "
+            f"{fmt_window(usage, 'modelo'):>7} {fmt_reset(usage, 'modelo'):>9}{tag}"
         )
     pinned = pinned_slot(store)
     if pinned:
         print(f"\n-> slot {pinned} fixado; use 'ccx auto --pin off' para liberar a rotação")
         return 0
     target = pick_target(usage_map, args.threshold, args.strategy)
+    all_blocked = all_known_usage_blocked(usage_map)
     hold_active = hold_active_on_unknown_usage(store, usage_map, active)
     if target and target != active:
-        print(f"\n-> {args.strategy} recomenda o slot {target}")
+        if all_blocked:
+            print(f"\n-> todas travadas; slot {target} libera primeiro")
+        else:
+            print(f"\n-> {args.strategy} recomenda o slot {target}")
         if hold_active:
             print(
                 f"-> monitor mantem o slot {active}: erro da conta ativa nao "
@@ -1052,7 +1177,9 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "tarefa '\\CCX\\Claude Monitor' no Agendador do Windows"
             )
     elif not target:
-        print("\n-> todas travadas em 100%, nada para onde trocar")
+        print("\n-> nenhuma conta tem cota conhecida para orientar a troca")
+    elif all_blocked:
+        print(f"\n-> todas travadas; slot {target} ja e o que libera primeiro")
     if not target or target == active or hold_active:
         print(f"-> proxima checagem em ~{fmt_delay(next_wake(usage_map, err_map, active))}")
     return 0
@@ -1088,7 +1215,6 @@ def do_switch(
             raise ValueError(f"Slot {key} nao existe mais.")
         apply_slot(slot)
         fresh["last_switch"] = time.time()
-        fresh.get("usage_cache", {}).pop(key, None)
         write_json(STORE, fresh)
         store.clear()
         store.update(fresh)
@@ -1151,6 +1277,7 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         return 2, PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
     target = pick_target(usage_map, args.threshold, args.strategy)
+    all_blocked = all_known_usage_blocked(usage_map)
     delay = float(args.poll) if args.poll else next_wake(usage_map, err_map, active)
     stamp = time.strftime("%H:%M:%S")
     # HTTP 429 aqui veio da medicao de usage, nao de uma chamada ao modelo.
@@ -1164,23 +1291,32 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         return 2, delay
     line = "  ".join(
         f"{k}{'*' if k == active else ''}:{fmt_window(u, '5h').strip()}/"
-        f"{fmt_window(u, '7d').strip()}"
+        f"{fmt_window(u, '7d').strip()}/{fmt_window(u, 'modelo').strip()}"
         for k, u in usage_map.items()
     )
     problems = [f"{k} {e}" for k, e in err_map.items() if e]
     tail = f"  [{'; '.join(problems)}]" if problems else ""
     nxt = f"  proxima em {fmt_delay(delay)}"
     if target is None:
-        print(f"[{stamp}] {line}  todas travadas{tail}{nxt}")
+        print(f"[{stamp}] {line}  sem cota conhecida{tail}{nxt}")
         return 3, delay
     if target == active:
-        print(f"[{stamp}] {line}  ok{tail}{nxt}")
-        return 2, delay
+        state = "aguardando primeiro reset" if all_blocked else "ok"
+        print(f"[{stamp}] {line}  {state}{tail}{nxt}")
+        return (3 if all_blocked else 2), delay
     waited = time.time() - store["last_switch"]
     if cooldown_blocks(usage_map, active, waited, args.cooldown):
         print(f"[{stamp}] {line}  cooldown {int(args.cooldown - waited)}s{tail}")
         return 2, min(delay, args.cooldown - waited + 1)
-    motivo = "ativa esgotada" if waited < args.cooldown else "limiar"
+    if all_blocked:
+        motivo = "proximo reset"
+    else:
+        active_usage = usage_map.get(active) if active else None
+        motivo = (
+            "ativa esgotada"
+            if active_usage is not None and utilization(active_usage) >= 100
+            else "limiar"
+        )
     print(f"[{stamp}] {line}  trocando {active} -> {target}{tail}")
     do_switch(store, target, reason=f"{motivo}; {line}")
     return 0, delay
@@ -1266,7 +1402,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ccx", description=__doc__.split("\n")[0])
-    ap.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    ap.add_argument("--threshold", type=float, default=CLAUDE_DEFAULT_THRESHOLD)
     ap.add_argument(
         "--strategy", choices=("consume-first", "best"), default="consume-first"
     )
@@ -1290,14 +1426,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--poll", type=int, default=0, help="segundos fixos (0 = dinamico, padrao)"
     )
-    p.add_argument("--cooldown", type=int, default=DEFAULT_COOLDOWN_S)
+    p.add_argument("--cooldown", type=int, default=CLAUDE_DEFAULT_COOLDOWN_S)
     p.add_argument("--once", action="store_true", help="uma checagem so, para cron")
     p.add_argument("--pin", metavar="SLOT|off", help="fixa um slot ou libera a rotação")
     p.set_defaults(func=cmd_auto)
 
     p = sub.add_parser("hook", help="checagem silenciosa para hook Stop")
     p.set_defaults(
-        func=cmd_hook, poll=0, cooldown=DEFAULT_COOLDOWN_S, once=True
+        func=cmd_hook, poll=0, cooldown=CLAUDE_DEFAULT_COOLDOWN_S, once=True
     )
 
     args = ap.parse_args(argv)

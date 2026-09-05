@@ -2,7 +2,9 @@
 
 Monitora a cota das contas Claude Code e troca de conta antes de bater o limite.
 
-Python stdlib puro, sem instalar nada. Nasceu para resolver um incômodo concreto:
+O núcleo é Python stdlib puro, sem instalar dependências. O hot-swap opcional do
+Codex compila um launcher local com o .NET Framework do Windows. O projeto nasceu
+para resolver um incômodo concreto:
 com duas assinaturas Pro, você fica monitorando na mão qual delas ainda tem cota,
 fazendo `/logout` e `/login` no meio do trabalho, e ainda desperdiça cota semanal
 que ia expirar sem ser usada.
@@ -14,11 +16,11 @@ Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 [Módulo Codex (ccx_codex)](#módulo-codex-ccx_codex).
 
 > [!IMPORTANT]
-> O modo de troca atual escreve a credencial **global** do cliente. Ele serve
-> para uso sequencial ou para várias sessões que deliberadamente compartilham
-> uma única identidade; não é um balanceador por agente e não migra com
-> segurança processos persistentes já abertos. Para contas simultâneas, o
-> padrão suportado pelos clientes é iniciar cada processo com um perfil isolado:
+> A troca padrão escreve a credencial **global** do cliente. No Codex, o bridge
+> opt-in também atualiza um app-server persistente já aberto, depois que o turno
+> corrente termina. Isso não é um balanceador por agente: dois app-servers no
+> mesmo `CODEX_HOME` tornam a troca ambígua e são recusados. Para contas
+> simultâneas, o padrão seguro continua sendo iniciar cada processo com um perfil isolado:
 > [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) no Claude e
 > [`CODEX_HOME`](https://developers.openai.com/codex/auth#credential-storage)
 > no Codex. O launcher opt-in `ccx_profile.py` inicia esses perfis sem tocar na
@@ -33,6 +35,7 @@ Também tem um módulo para contas do Codex CLI (ChatGPT), ver
 - [Comandos](#comandos)
 - [Estratégias de troca](#estratégias-de-troca)
 - [Perfis isolados](#perfis-isolados)
+- [Hot-swap do Codex no VS Code](#hot-swap-do-codex-no-vs-code)
 - [Intervalo de checagem](#intervalo-de-checagem)
 - [Monitor contínuo no Windows](#monitor-contínuo-no-windows)
 - [No VS Code](#no-vs-code)
@@ -90,13 +93,13 @@ Flags globais, válidas em qualquer subcomando:
 | Flag | Padrão | Efeito |
 | --- | --- | --- |
 | `--strategy consume-first\|best` | `consume-first` | Ver [Estratégias](#estratégias-de-troca) |
-| `--threshold N` | `60` | Percentual em que a conta deixa de ser candidata |
+| `--threshold N` | `80` | Percentual em que a conta deixa de ser candidata |
 
 Flags do `auto`:
 
 | Flag | Padrão | Efeito |
 | --- | --- | --- |
-| `--cooldown N` | `120` | Segundos mínimos entre duas trocas, evita pingue-pongue. Não se aplica quando a conta ativa já está em 100%, ver [Estratégias](#estratégias-de-troca) |
+| `--cooldown N` | `60` | Segundos mínimos entre duas trocas, evita pingue-pongue. Não se aplica quando a conta ativa já está em 100%, ver [Estratégias](#estratégias-de-troca) |
 | `--poll N` | `0` | Força intervalo fixo em segundos. `0` usa o dinâmico |
 | `--once` | | Uma checagem só e sai, para uso em agendador |
 | `--pin N\|off` | | Fixa o slot `N` e suspende a rotação; `off` a libera novamente |
@@ -110,6 +113,10 @@ triplicando o tráfego e disputando a mesma troca.
 
 `status`, `hook` e `auto` também compartilham um cache em disco. Rodar `status`
 várias vezes seguidas não gera uma nova consulta por conta a cada execução.
+Somente a conta ativa é consultada periodicamente. Contas inativas reutilizam o
+último percentual conhecido, pois não consomem cota enquanto estão paradas; se
+um `resets_at` vencer nesse intervalo, o CCX projeta aquela janela para 0% sem
+chamar a API. Quando uma conta volta a ser ativa, ela é consultada novamente.
 
 Para fixar uma conta, use `python ccx.py auto --pin 3`. A escolha é persistida,
 troca para o slot caso necessário e continua valendo após o watchdog reiniciar o
@@ -142,8 +149,8 @@ Os perfis ficam em `~/.ccx/profiles/claude/N` e `~/.ccx/profiles/codex/N`.
 O `N` é apenas o rótulo do perfil; não equivale a um slot global do `ccx`. Para
 Codex, o launcher força o backend de credenciais em arquivo no processo filho,
 evitando compartilhar o keyring com outra sessão. Settings, plugins e histórico
-também ficam separados por perfil. Não combine `ccx_codex auto` com agentes
-persistentes: rotação global continua sendo para invocações sequenciais.
+também ficam separados por perfil. Sem o bridge, não combine `ccx_codex auto`
+com agentes persistentes: a rotação global só alcança invocações novas.
 
 ## Monitor contínuo no Windows
 
@@ -165,8 +172,9 @@ encerramento manual, relançamento e troca ficam em
 `~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
 
 Cada troca vai para o log **com o snapshot que a justificou**, no formato
-`troca para o slot 4 (ativa esgotada; 1:100.0%/26.0%  2:86.0%/67.0%  ...)`. O motivo é
-`limiar`, `ativa esgotada`, `manual` ou `fixacao`. Sem isso o log só diz o destino, e
+`troca para o slot 4 (ativa esgotada; 1:100.0%/26.0%/100.0%  2:86.0%/67.0%/- ...)`.
+As três posições são 5h, 7d e semanal do modelo. O motivo é `limiar`,
+`ativa esgotada`, `proximo reset`, `manual` ou `fixacao`. Sem isso o log só diz o destino, e
 um post-mortem não consegue distinguir "escolheu uma conta com folga" de "escolheu a
 menos pior": foi exatamente o que faltou para fechar o diagnóstico de 19/08/2026. O que
 entra ali é percentual e número de slot, nunca token, e-mail ou payload.
@@ -200,8 +208,9 @@ Primeiro, dois conceitos que não são a mesma coisa:
 - **Utilizável:** a janela que aperta está abaixo de 100%. A conta consegue atender.
 - **Candidata:** a janela que aperta está abaixo do `--threshold`. Vale trocar para ela.
 
-"Janela que aperta" é a maior entre 5h e 7d, porque é a que bloqueia primeiro. Uma
-conta com 5h em 0% e semanal em 97% está tão bloqueada quanto o contrário.
+"Janela que aperta" é a maior entre 5h, 7d e o limite semanal por modelo, porque
+é a que bloqueia primeiro. Uma conta com 5h em 0% e semanal em 97% está tão
+apertada quanto o contrário.
 
 **`consume-first`** (padrão): entre as candidatas, escolhe a de reset semanal mais
 próximo. Cota semanal é perecível, então a lógica é gastar primeiro a que vai virar
@@ -211,9 +220,14 @@ pó. Troca mais, aproveita mais.
 desperdiça cota semanal que ia expirar.
 
 **Quando nenhuma conta é candidata**, cai para a utilizável de menor utilização. O
-limiar existe para trocar antes de bater, não para te deixar parado numa conta
-travada tendo outra que ainda atende. Se todas estiverem em 100%, aí não há o que
-fazer e ele avisa.
+`consume-first` considera utilizações com diferença menor que 5 pontos como empate e
+prefere, entre elas, o reset semanal mais próximo. O limiar existe para trocar antes
+de bater, não para te deixar parado numa conta travada tendo outra que ainda atende.
+Se todas estiverem em 100%, o CCX estaciona na conta que ficará completamente
+utilizável primeiro, sem margem de empate. Quando a próxima conta liberar, ela volta
+à seleção normal e o semanal mais próximo pode provocar a troca seguinte. Quando mais
+de uma janela da mesma conta está em 100%, vale o reset mais tarde, pois todas precisam
+liberar.
 
 Conta com cota desconhecida (erro de rede, token morto) nunca é escolhida
 automaticamente, mas segue sendo alvo válido de um `switch` explícito.
@@ -237,7 +251,7 @@ Daí a regra para mexer nesses dois números, que são calibrados juntos:
 (100 - threshold) / burn_rate  >>  cooldown + maior POLL_TIGHT
 ```
 
-Com os valores de hoje: 40 pontos a 5 pts/min dão 480s, contra 120 + 60 = 180s. Baixar
+Com os valores de hoje: 20 pontos a 5 pts/min dão 240s, contra 60 + 60 = 120s. Baixar
 o limiar sem olhar o cooldown, ou aumentar o cooldown sem olhar o limiar, recria o
 travamento.
 
@@ -338,12 +352,51 @@ Use `Tasks: Run Task` → `ccx auto (fallback manual)` somente quando o monitor
 permanente não estiver instalado ou durante diagnóstico. Não é preciso executar a
 task a cada troca, a cada `status` nem quando um agente termina.
 
-Não mantenha `ccx_codex auto` junto da extensão do Codex: a extensão usa um processo
-persistente que pode continuar com a identidade carregada na inicialização mesmo
-depois de `auth.json` mudar.
+Sem instalar o bridge, não mantenha `ccx_codex auto` junto da extensão do Codex:
+o processo persistente continua com a identidade carregada mesmo depois de
+`auth.json` mudar. Com o bridge ativo, `switch` e `auto` esperam o turno corrente,
+trocam a identidade em memória e só depois confirmam o arquivo em disco.
 
 Fora do VS Code, `ccx-auto.cmd` faz o mesmo com um duplo clique, de qualquer
 diretório.
+
+## Hot-swap do Codex no VS Code
+
+No Windows, instale uma vez o bridge opt-in:
+
+```powershell
+cd C:\caminho\para\ccx
+.\install-ccx-codex-bridge.ps1
+```
+
+O instalador compila um launcher nativo em `~/.ccx/bin`, configura
+`chatgpt.cliExecutable` e impede que esse caminho local seja enviado pelo Settings
+Sync. A edição reconhece comentários JSONC e mantém o original em
+`settings.json.ccx-codex-bridge.bak` enquanto o bridge estiver instalado. Ele
+**não** mata nem reinicia o processo atual. Quando for seguro, execute
+`Developer: Reload Window` uma vez. Da sessão seguinte em diante:
+
+```powershell
+python ccx_codex.py switch 4
+# ... slot 4 ativo (app-server atualizado) ...
+```
+
+Uma requisição que já está em voo continua na conta em que começou. O bridge segura
+novos trabalhos, aguarda `turn/completed`, usa o login externo oficial do app-server
+e grava o arquivo somente depois da confirmação. Falha ou timeout aborta sem avançar
+`last_switch`. O fluxo completo, limites, segurança, validação e rollback estão em
+[`docs/features/codex-hot-swap.md`](docs/features/codex-hot-swap.md).
+
+Para remover:
+
+```powershell
+.\install-ccx-codex-bridge.ps1 -Uninstall
+```
+
+O uninstall restaura apenas as configurações que o instalador tomou para si, remove
+o backup depois da restauração bem-sucedida e também espera um reload manual. Se a
+chave tiver sido assumida por outro software, ele preserva tanto a configuração atual
+quanto o backup e sai com erro. Nenhum dos dois comandos encerra um agente.
 
 ## Como funciona por dentro
 
@@ -354,8 +407,9 @@ e o header `anthropic-beta: oauth-2025-04-20`. É a mesma fonte que o `/usage` d
 Claude Code consome.
 
 Leitura pura: não manda prompt, não consome cota e **não abre a janela de 5h**. A
-resposta traz `five_hour` e `seven_day`, cada um com `utilization` (percentual) e
-`resets_at` (ISO 8601).
+resposta traz `five_hour`, `seven_day` e limites semanais por modelo em `limits`,
+cada um com percentual e reset. O CCX usa o limite de modelo mais alto como
+restrição conservadora, para não escolher uma conta que já bloqueou um modelo.
 
 ### O que a troca escreve
 
@@ -417,6 +471,11 @@ O mesmo ponto também protege o cache de usage. Depois de conseguir o lock, cada
 processo relê o store antes de decidir se consulta a rede. Isso importa porque um
 hook pode ter carregado o arquivo enquanto outro ainda estava consultando; sem a
 releitura, os dois fariam a mesma chamada mesmo estando serializados.
+
+O cache também evita uma rajada por número de contas. O monitor atualiza pela API
+somente o slot ativo e conserva o snapshot dos inativos. A troca não apaga esse
+snapshot: se a primeira leitura da nova ativa receber `429`, o seletor ainda sabe
+qual era sua cota no instante em que ela saiu do repouso.
 
 `do_switch` faz a mesma releitura antes da escrita final. Isso evita que uma decisão
 já calculada apague o refresh token ou o cache que outro hook gravou enquanto ela
@@ -585,10 +644,10 @@ poderia eleger justamente a conta que acabou de morrer.
   manipular o estado da conta, o mesmo motivo pelo qual não existe ping de
   aquecimento no módulo Claude. Fica para uma versão futura, só como leitura.
   Ver [Módulo Codex](#módulo-codex-ccx_codex).
-- **Não considera limites semanais por modelo.** A API expõe isso num array
-  `limits` com entradas `weekly_scoped`, que hoje é ignorado. Se você trabalha
-  fixado num modelo e bate o limite dele antes das janelas gerais, esse ramo
-  precisaria entrar na decisão.
+- **O limite por modelo é conservador.** O CCX não sabe qual modelo uma sessão
+  persistente vai pedir. Por isso considera o maior `weekly_scoped` de cada
+  conta para a rotação. Isso evita trocar para uma conta que já bloqueou um
+  modelo, mas pode deixar de usar a folga de outro modelo naquela mesma conta.
 - **A troca é global, não por agente.** Várias sessões abertas no mesmo perfil
   podem manter credenciais em memória, disputar refresh ou continuar na identidade
   anterior. Para paralelismo real, use `ccx_profile.py` para iniciar processos
@@ -618,7 +677,7 @@ letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você me
 python test_ccx.py
 ```
 
-Sem framework, só `assert`. 42 testes cobrindo:
+Sem framework, só `assert`. 59 testes cobrindo:
 
 - escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
 - cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
@@ -656,6 +715,13 @@ python test_ccx_profile.py
 Ela cobre validação do rótulo, ausência de path traversal, ambiente filho
 isolado e o backend de credenciais em arquivo do Codex.
 
+O bridge tem uma suíte própria, inclusive smoke contra o app-server real com
+tokens sintéticos (sem chamada de modelo ou consumo de cota):
+
+```bash
+python test_ccx_codex_bridge.py
+```
+
 ## Módulo Codex (ccx_codex)
 
 Mesma ideia do `ccx.py`, para contas do Codex CLI (ChatGPT). É um arquivo
@@ -669,8 +735,11 @@ arquivo de credencial e protocolo da API de usage.
 # logue com a primeira conta no Codex CLI, depois:
 python ccx_codex.py add
 
-# codex logout, codex login com a segunda conta, depois:
-python ccx_codex.py add
+# cadastre a segunda sem revogar a primeira (veja "token_revoked" acima):
+python ccx_profile.py login codex 2
+$env:CODEX_HOME = "$HOME\.ccx\profiles\codex\2"
+python ccx_codex.py add 2
+Remove-Item Env:CODEX_HOME
 
 # confira
 python ccx_codex.py status
@@ -678,7 +747,7 @@ python ccx_codex.py status
 # veja Claude Code e Codex na mesma saída
 python ccx.py stats
 
-# somente para invocações sequenciais/frescas; não use com extensão/app-server aberto
+# sem o bridge, só afeta invocações novas; com ele, troca o app-server ocioso
 python ccx_codex.py auto
 ```
 
@@ -687,13 +756,17 @@ Os comandos, flags e a leitura do `status`/`auto` são idênticos aos do
 só troque `ccx.py` por `ccx_codex.py`. `ccx-codex-auto.cmd` faz o mesmo que
 `ccx-auto.cmd`, para o Codex.
 
+Os parâmetros continuam aceitando as mesmas flags, mas os defaults do Codex são
+`--threshold 60` e `--cooldown 120`; o monitor do Claude usa `80` e `60` para
+trocar antes, sem mudar a calibração do outro provedor.
+
 `--pin` também funciona igual (`python ccx_codex.py auto --pin 1`), e aqui ele
 resolve mais do que no módulo Claude: como o Codex não tem monitor permanente,
 o `auto --pin N` grava a fixação, reposiciona o `auth.json` no slot `N` e, sem
 nada rodando depois, a conta simplesmente fica onde foi deixada. Se você mantiver
 um `auto` do Codex aberto, ele passa a só confirmar a fixação, sem consultar cota.
-Continua valendo o aviso de não trocar o `auth.json` com extensão ou app-server
-abertos: eles já carregaram a identidade na memória.
+Sem o bridge, um app-server aberto continua com a identidade antiga. Com o bridge,
+a fixação usa a mesma transação de hot-swap descrita acima.
 
 ### O que é diferente do módulo Claude
 
@@ -716,15 +789,16 @@ abertos: eles já carregaram a identidade na memória.
   curta, ~5h) e `secondary_window` (semanal), mapeados para os mesmos rótulos
   `5h`/`7d` que o resto do código já entende, então a engine de decisão do
   `ccx.py` funciona sem nenhuma alteração.
-- **Processos persistentes mantêm a identidade em memória.** O `AuthManager`
+- **Processos persistentes mantêm a identidade em memória sem o bridge.** O `AuthManager`
   oficial carrega `auth.json` uma vez, só observa mudanças externas após reload
   explícito e protege a identidade original da sessão. Portanto,
-  `ccx_codex switch/auto` altera invocações **novas**, mas não migra com segurança
-  a extensão, app-server ou agentes já abertos. Uma sessão antiga ainda pode
+  `ccx_codex switch/auto` altera apenas invocações **novas** no modo padrão. O
+  bridge opt-in usa `account/login/start` com `chatgptAuthTokens` para atualizar
+  um app-server vivo depois do turno atual. Uma sessão antiga sem o bridge ainda pode
   tentar renovar o token anterior e terminar em 401
   ([código oficial](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
   Para contas paralelas, use `ccx_profile.py` para iniciar um `CODEX_HOME` isolado
-  por processo.
+  por processo; o bridge recusa vários app-servers compartilhando o mesmo home.
 - **Workspace em vez de organização.** O aviso de cota compartilhada usa
   `workspace_id` (seats de Team/Enterprise) em vez do `organizationUuid` do
   Claude Code.
@@ -736,9 +810,9 @@ Este módulo nasceu de ler o código-fonte do
 [codex-lb](https://github.com/Soju06/codex-lb) (load balancer de contas
 ChatGPT, proxy completo com dashboard) para extrair o protocolo real:
 endpoint de usage, endpoint e client_id de refresh, e o formato do
-`auth.json`. A arquitetura de proxy dele não foi portada, o `ccx_codex`
-continua com a filosofia do `ccx.py`: sem servidor, sem dependência, só
-reposiciona a credencial que o Codex CLI oficial usa.
+`auth.json`. O módulo principal continua sem dependência externa. O bridge local
+é opt-in e estreito: proxy stdio transparente mais um controle autenticado em
+loopback, sem dashboard nem proxy de chamadas ao modelo.
 
 ### Teste
 
@@ -746,7 +820,7 @@ reposiciona a credencial que o Codex CLI oficial usa.
 python test_ccx_codex.py
 ```
 
-Mesmo estilo do `test_ccx.py`, com 30 testes cobrindo o que é específico do Codex: leitura
+Mesmo estilo do `test_ccx.py`, com 39 testes cobrindo o que é específico do Codex: leitura
 de claims do JWT, expiração via `exp`, classificação de erro de refresh
 (permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
 para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na
@@ -754,6 +828,10 @@ troca, identidade sobrevivendo à rotação de refresh token, cache compartilhad
 429 de usage com decisão baseada em histórico recente, slot fixado curto-circuitando
 a checagem sem consultar cota, troca sem sobrescrever estado concorrente e continuidade
 do auto após erro inesperado sem vazar detalhe da exceção.
+
+`test_ccx_codex_bridge.py` soma 18 testes de framing, autenticação local, barreira
+de turnos, commit/rollback, refresh, múltiplos app-servers, launcher nativo,
+instalação JSONC reversível e hot-login real sem reinício.
 
 ## Licença
 

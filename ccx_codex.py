@@ -23,15 +23,15 @@ Diferencas relevantes em relacao ao modulo Claude (ccx.py):
   - Sem "expiresAt" gravado: a expiracao vem do claim "exp" do access_token,
     que e um JWT. Decodificado localmente so para leitura, sem verificar
     assinatura (o servidor e quem valida de verdade quando o token e usado).
-  - SEM lock cooperativo confirmado com o Codex CLI real. O modulo Claude
+  - Sem o bridge opt-in, nao ha lock cooperativo confirmado com o Codex CLI real. O modulo Claude
     tem um lock de diretorio documentado no proprio codigo do Claude Code;
     nao ha confirmacao equivalente para o Codex CLI (o codex-lb, projeto que
     inspirou este modulo, e um proxy de rede e nunca escreve o auth.json
     local por baixo de um Codex CLI rodando, entao nao serviu de referencia
-    aqui). A escrita continua atomica (tmp + os.replace), mas trocar bem no
-    instante em que o Codex CLI esta renovando o proprio token e uma janela
-    de corrida que este modulo nao cobre. Evite rodar `ccx_codex auto` e usar
-    o Codex CLI ativamente no mesmo segundo em que uma troca cair.
+    aqui). A escrita continua atomica (tmp + os.replace), mas so vale para
+    processos novos. `ccx_codex_bridge.py` elimina essa divergencia para um
+    app-server: espera o turno terminar, troca a autenticacao em memoria e
+    confirma o arquivo dentro da mesma transacao.
   - Rotulos internos "5h"/"7d" sao so posicionais (primary_window vira "5h",
     secondary_window vira "7d"), nao uma promessa de duracao: toda a engine
     de decisao do ccx.py (pick_target, band_delay, next_wake) e reusada sem
@@ -99,6 +99,11 @@ DEAD_REFRESH_CODES = {
     "account_deleted",
 }
 
+
+class _SwitchCancelled(Exception):
+    """Fixacao mudou enquanto a troca aguardava o app-server ficar ocioso."""
+
+
 dir_lock = ccx.claude_lock  # generico: mkdir em <target>.lock e o mutex
 
 
@@ -154,11 +159,31 @@ def token_expired(tokens: dict) -> bool:
     return datetime.now(timezone.utc).timestamp() + REFRESH_SKEW_S >= float(exp)
 
 
+def external_auth_payload(tokens: dict, account_id: str = "") -> dict:
+    """Payload minimo aceito por ``chatgptAuthTokens``.
+
+    Refresh token e id token nunca atravessam o socket local do bridge. O
+    app-server precisa somente do access token e da identidade da conta; a
+    renovacao continua sob responsabilidade do CCX.
+    """
+    access_token = tokens.get("access_token")
+    identity = identity_from_tokens(tokens)
+    resolved_account_id = account_id or identity.get("account_id")
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("Slot Codex sem access token.")
+    if not isinstance(resolved_account_id, str) or not resolved_account_id:
+        raise ValueError("Slot Codex sem account_id.")
+    return {
+        "accessToken": access_token,
+        "chatgptAccountId": resolved_account_id,
+    }
+
+
 # --------------------------------------------------------------------------
 # API
 
 
-def refresh_tokens(tokens: dict) -> tuple[dict | None, str]:
+def refresh_tokens(tokens: dict, *, timeout: float = 10.0) -> tuple[dict | None, str]:
     """Renova o par de tokens. Devolve (tokens_novos, erro).
 
     erro: "" ok, "dead" refresh token rejeitado de vez, "transient" o resto.
@@ -181,7 +206,7 @@ def refresh_tokens(tokens: dict) -> tuple[dict | None, str]:
         method="POST",
     )
     try:
-        data = ccx.http_json(req)
+        data = ccx.http_json(req, timeout=timeout)
         new = dict(tokens)
         for key in ("access_token", "refresh_token", "id_token"):
             if data.get(key):
@@ -344,6 +369,98 @@ def store_lock():
     return dir_lock(STORE.parent / "codex_store")
 
 
+def switch_lock():
+    """Serializa a transacao arquivo + app-server entre comandos CCX."""
+    return dir_lock(STORE.parent / "codex_switch")
+
+
+def _prepare_switch_slot(key: str, slot: dict, store: dict) -> dict:
+    """Garante token utilizavel e devolve o payload sem credencial persistente."""
+    if slot.get("dead"):
+        raise ValueError(f"Slot {key}: {DEAD_SLOT_MSG}")
+    tokens = slot.get("tokens")
+    if not isinstance(tokens, dict):
+        raise ValueError(f"Slot {key} sem tokens.")
+    if token_expired(tokens):
+        new, error = refresh_tokens(tokens)
+        if not new:
+            if error == "dead":
+                mark_dead(key, slot, store)
+                raise ValueError(f"Slot {key}: {DEAD_SLOT_MSG}")
+            raise RuntimeError(f"Nao foi possivel renovar o slot {key}; tente novamente.")
+        slot["tokens"] = new
+        identity = identity_from_tokens(new)
+        slot["email"] = identity.get("email") or slot.get("email", "")
+        slot["account_id"] = identity.get("account_id") or slot.get("account_id", "")
+        slot["workspace_id"] = identity.get("workspace_id") or slot.get(
+            "workspace_id", ""
+        )
+        slot.pop("dead", None)
+        ccx.write_json(STORE, store)
+        tokens = new
+    return external_auth_payload(tokens, slot.get("account_id", ""))
+
+
+def refresh_for_bridge(previous_account_id: str, stale_access_token: str) -> dict:
+    """Renova autenticacao externa a pedido do app-server em ate poucos segundos.
+
+    Se outro bridge ja renovou o mesmo slot, reutiliza o token novo em vez de
+    gastar o refresh token outra vez. O chamador nunca recebe refresh/id token.
+    """
+    if not isinstance(previous_account_id, str) or not previous_account_id:
+        raise ValueError("Refresh externo sem account_id.")
+    with store_lock():
+        store = load_store()
+        match = next(
+            (
+                (key, slot)
+                for key, slot in store["slots"].items()
+                if slot.get("account_id") == previous_account_id
+                or identity_from_tokens(slot.get("tokens", {})).get("account_id")
+                == previous_account_id
+            ),
+            None,
+        )
+        if match is None:
+            raise ValueError("Conta pedida pelo app-server nao existe nos slots.")
+        key, slot = match
+        if slot.get("dead"):
+            raise ValueError(DEAD_SLOT_MSG)
+        tokens = slot.get("tokens")
+        if not isinstance(tokens, dict):
+            raise ValueError("Slot Codex sem tokens.")
+        current_access = tokens.get("access_token")
+        if current_access != stale_access_token:
+            return external_auth_payload(tokens, slot.get("account_id", ""))
+
+        new, error = refresh_tokens(tokens, timeout=7.0)
+        if not new:
+            if error == "dead":
+                mark_dead(key, slot, store)
+                raise ValueError(DEAD_SLOT_MSG)
+            raise RuntimeError("Refresh externo temporariamente indisponivel.")
+        slot["tokens"] = new
+        identity = identity_from_tokens(new)
+        slot["email"] = identity.get("email") or slot.get("email", "")
+        slot["account_id"] = identity.get("account_id") or slot.get("account_id", "")
+        slot["workspace_id"] = identity.get("workspace_id") or slot.get(
+            "workspace_id", ""
+        )
+        slot.pop("dead", None)
+
+        # Persistir no auth.json so quando ele ainda representa esta conta. Na
+        # fase preparada de uma troca, o arquivo continua deliberadamente na
+        # conta anterior ate o bridge confirmar o login em memoria.
+        try:
+            _, live = live_identity()
+        except SystemExit:
+            live = {}
+        if live.get("account_id") == previous_account_id:
+            apply_slot(slot)
+        ccx.write_json(STORE, store)
+        return external_auth_payload(new, slot.get("account_id", ""))
+
+
 def _error_code(e: urllib.error.HTTPError) -> str:
     """error.code do corpo da resposta, ou "" se nao der para ler.
 
@@ -432,10 +549,40 @@ def collect(store: dict) -> tuple[dict[str, dict | None], dict[str, str], str | 
         now = time.time()
         changed = False
         for key, slot in store["slots"].items():
-            cached = ccx.cached_slot_usage(store, key, now)
+            is_active = key == active
+            entry = store.get("usage_cache", {}).get(key, {})
+            previous_usage = entry.get("usage")
+            was_marked_inactive = entry.get("inactive") is True
+            inactive = (
+                ccx.inactive_slot_usage(store, key, now)
+                if not is_active and not slot.get("dead")
+                else None
+            )
+            if inactive is not None:
+                usage_map[key], err_map[key] = inactive, ""
+                changed |= not was_marked_inactive or inactive != previous_usage
+                continue
+            cached = (
+                None
+                if is_active and entry.get("inactive", True)
+                else ccx.cached_slot_usage(store, key, now)
+            )
             if cached is None:
-                cached = slot_usage(key, slot, key == active, store)
+                was_inactive = bool(entry.get("inactive"))
+                inactive_snapshot = entry.get("usage") if was_inactive else None
+                cached = slot_usage(key, slot, is_active, store)
                 ccx.remember_slot_usage(store, key, *cached, now)
+                refreshed = store["usage_cache"][key]
+                if (
+                    is_active
+                    and cached[0] is None
+                    and cached[1] == "HTTP 429"
+                    and isinstance(inactive_snapshot, dict)
+                ):
+                    refreshed["usage"] = inactive_snapshot
+                    refreshed["known_at"] = now
+                    cached = inactive_snapshot, cached[1]
+                refreshed["inactive"] = not is_active
                 changed = True
             usage_map[key], err_map[key] = cached
         if changed:
@@ -545,21 +692,35 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"\n-> slot {pinned} fixado; use 'ccx_codex auto --pin off' para liberar a rotação")
         return 0
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
+    all_blocked = ccx.all_known_usage_blocked(usage_map)
     hold_active = ccx.hold_active_on_unknown_usage(store, usage_map, active)
+    try:
+        import ccx_codex_bridge
+
+        bridges = ccx_codex_bridge.bridge_count()
+    except Exception:
+        bridges = 0
     if target and target != active:
-        print(f"\n-> {args.strategy} recomenda o slot {target}")
+        if all_blocked:
+            print(f"\n-> todas travadas; slot {target} libera primeiro")
+        else:
+            print(f"\n-> {args.strategy} recomenda o slot {target}")
         if hold_active:
             print(
                 f"-> monitor mantem o slot {active}: erro da conta ativa nao "
                 "confirma falta de cota"
             )
         else:
-            print(
-                "-> troca pendente; Codex nao tem monitor permanente. Nao "
-                "troque auth.json com extensao/app-server aberto"
-            )
+            if bridges == 1:
+                print("-> hot-swap disponivel; a troca aguardara o turno ativo terminar")
+            elif bridges > 1:
+                print("-> troca bloqueada: ha varios app-servers no mesmo CODEX_HOME")
+            else:
+                print("-> sem bridge ativo; a troca valera apenas para novas sessoes")
     elif not target:
-        print("\n-> todas travadas em 100%, nada para onde trocar")
+        print("\n-> nenhuma conta tem cota conhecida para orientar a troca")
+    elif all_blocked:
+        print(f"\n-> todas travadas; slot {target} ja e o que libera primeiro")
     if not target or target == active or hold_active:
         print(
             f"-> proxima checagem em "
@@ -575,20 +736,54 @@ def do_switch(
     only_if_pinned: bool = False,
     reason: str = "",
 ) -> bool:
-    with store_lock():
-        fresh = load_store()
-        if only_if_pinned and pinned_slot(fresh) != key:
-            return False
-        slot = fresh["slots"].get(key)
-        if slot is None:
-            raise ValueError(f"Slot {key} nao existe mais.")
-        apply_slot(slot)
-        fresh["last_switch"] = time.time()
-        fresh.get("usage_cache", {}).pop(key, None)
-        ccx.write_json(STORE, fresh)
-        store.clear()
-        store.update(fresh)
-    print(f"[{time.strftime('%H:%M:%S')}] slot {key} ativo: {slot['email']}")
+    # Import tardio evita custo e dependencia circular nos comandos que apenas
+    # consultam uso. O bridge, quando executado, importa este modulo para
+    # atender o callback de refresh do app-server.
+    import ccx_codex_bridge
+
+    committed = {}
+
+    def commit_to_disk() -> None:
+        """Segunda fase: so roda depois de o app-server aceitar a conta."""
+        with store_lock():
+            fresh = load_store()
+            if only_if_pinned and pinned_slot(fresh) != key:
+                raise _SwitchCancelled
+            slot = fresh["slots"].get(key)
+            if slot is None:
+                raise ValueError(f"Slot {key} nao existe mais.")
+            current_payload = external_auth_payload(
+                slot.get("tokens", {}), slot.get("account_id", "")
+            )
+            if current_payload["chatgptAccountId"] != committed["account_id"]:
+                raise RuntimeError("O slot mudou durante a troca; operacao cancelada.")
+            apply_slot(slot)
+            fresh["last_switch"] = time.time()
+            ccx.write_json(STORE, fresh)
+            store.clear()
+            store.update(fresh)
+            committed["email"] = slot.get("email", "")
+
+    try:
+        with switch_lock():
+            with store_lock():
+                fresh = load_store()
+                if only_if_pinned and pinned_slot(fresh) != key:
+                    return False
+                slot = fresh["slots"].get(key)
+                if slot is None:
+                    raise ValueError(f"Slot {key} nao existe mais.")
+                payload = _prepare_switch_slot(key, slot, fresh)
+                committed["account_id"] = payload["chatgptAccountId"]
+            live = ccx_codex_bridge.transactional_switch(payload, commit_to_disk)
+    except _SwitchCancelled:
+        return False
+
+    suffix = "app-server atualizado" if live else "novas sessoes"
+    print(
+        f"[{time.strftime('%H:%M:%S')}] slot {key} ativo ({suffix}): "
+        f"{committed['email']}"
+    )
     # Mesmo contrato do modulo Claude: o snapshot da decisao vai junto, senao o
     # log so diz o destino e o post-mortem nao sabe por que ele foi escolhido.
     # Percentual e numero de slot podem entrar; token, e-mail e payload nao.
@@ -645,6 +840,7 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         return 2, ccx.PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
     target = ccx.pick_target(usage_map, args.threshold, args.strategy)
+    all_blocked = ccx.all_known_usage_blocked(usage_map)
     delay = float(args.poll) if args.poll else ccx.next_wake(usage_map, err_map, active, BANDS)
     stamp = time.strftime("%H:%M:%S")
     if ccx.hold_active_on_unknown_usage(store, usage_map, active):
@@ -662,17 +858,26 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
     tail = f"  [{'; '.join(problems)}]" if problems else ""
     nxt = f"  proxima em {ccx.fmt_delay(delay)}"
     if target is None:
-        print(f"[{stamp}] {line}  todas travadas{tail}{nxt}")
+        print(f"[{stamp}] {line}  sem cota conhecida{tail}{nxt}")
         return 3, delay
     if target == active:
-        print(f"[{stamp}] {line}  ok{tail}{nxt}")
-        return 2, delay
+        state = "aguardando primeiro reset" if all_blocked else "ok"
+        print(f"[{stamp}] {line}  {state}{tail}{nxt}")
+        return (3 if all_blocked else 2), delay
     waited = time.time() - store["last_switch"]
     if ccx.cooldown_blocks(usage_map, active, waited, args.cooldown):
         print(f"[{stamp}] {line}  cooldown {int(args.cooldown - waited)}s{tail}")
         return 2, min(delay, args.cooldown - waited + 1)
     print(f"[{stamp}] {line}  trocando {active} -> {target}{tail}")
-    motivo = "ativa esgotada" if waited < args.cooldown else "limiar"
+    if all_blocked:
+        motivo = "proximo reset"
+    else:
+        active_usage = usage_map.get(active) if active else None
+        motivo = (
+            "ativa esgotada"
+            if active_usage is not None and ccx.utilization(active_usage) >= 100
+            else "limiar"
+        )
     do_switch(store, target, reason=f"{motivo}; {line}")
     return 0, delay
 
@@ -775,6 +980,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERRO: {e}")
         return 1
     except TimeoutError as e:
+        print(f"ERRO: {e}")
+        return 1
+    except (ValueError, RuntimeError) as e:
         print(f"ERRO: {e}")
         return 1
 

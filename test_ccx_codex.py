@@ -6,12 +6,14 @@ import json
 import os
 import tempfile
 import unittest.mock as mock
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import ccx
 import ccx_codex
+import ccx_codex_bridge
 
 
 def make_jwt(claims: dict) -> str:
@@ -19,6 +21,14 @@ def make_jwt(claims: dict) -> str:
     jwt_claims() so olha o segundo segmento."""
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     return f"header.{payload}.sig"
+
+
+def test_auto_codex_mantem_defaults_compartilhados():
+    received = []
+    with mock.patch.object(ccx_codex, "cmd_auto", side_effect=lambda args: received.append(args) or 0):
+        assert ccx_codex.main(["auto", "--once"]) == 0
+    assert received[0].threshold == 60.0
+    assert received[0].cooldown == 120
 
 
 def test_jwt_claims_decodifica_e_tolera_lixo():
@@ -282,7 +292,7 @@ def test_check_once_codex_troca_com_429_apos_confirmacao_recente():
     switch.assert_called_once()
     assert switch.call_args.args == (store, "2")
     # O motivo carrega o snapshot da decisao; o formato exato e do check_once.
-    assert switch.call_args.kwargs["reason"].startswith("limiar; ")
+    assert switch.call_args.kwargs["reason"].startswith("ativa esgotada; ")
 
 
 def test_check_once_codex_respeita_slot_fixado_sem_consultar_cota():
@@ -314,7 +324,7 @@ def test_collect_codex_reusa_o_cache_compartilhado():
         "slots": {"1": {"email": "a@x.com"}},
         "last_switch": 0,
         "usage_cache": {
-            "1": {"at": 100.0, "usage": conhecida, "error": ""},
+            "1": {"at": 100.0, "usage": conhecida, "error": "", "inactive": False},
         },
     }
 
@@ -329,6 +339,104 @@ def test_collect_codex_reusa_o_cache_compartilhado():
         assert ccx_codex.collect({}) == ({"1": conhecida}, {"1": ""}, "1")
 
     fetch.assert_not_called()
+
+
+def test_collect_codex_revalida_cache_legado_sem_marca_inactive():
+    antiga = {"5h": {"pct": 3.0, "resets_at": None}}
+    nova = {"5h": {"pct": 9.0, "resets_at": None}}
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 990.0, "known_at": 990.0, "usage": antiga, "error": ""}
+        },
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "active_slot", return_value="1"),
+        mock.patch.object(ccx_codex, "sync_active_slot"),
+        mock.patch.object(ccx_codex.time, "time", return_value=1_000.0),
+        mock.patch.object(ccx_codex, "slot_usage", return_value=(nova, "")) as fetch,
+        mock.patch.object(ccx, "write_json"),
+    ):
+        usage_map, _, _ = ccx_codex.collect({})
+    fetch.assert_called_once()
+    assert usage_map == {"1": nova}
+    assert fresh["usage_cache"]["1"]["inactive"] is False
+
+
+def test_collect_codex_consulta_so_ativa_e_memoriza_inativa():
+    ativa = {
+        "5h": {"pct": 30.0, "resets_at": None},
+        "7d": {"pct": 20.0, "resets_at": None},
+    }
+    inativa = {
+        "5h": {"pct": 10.0, "resets_at": None},
+        "7d": {"pct": 5.0, "resets_at": None},
+    }
+    nova = {
+        "5h": {"pct": 35.0, "resets_at": None},
+        "7d": {"pct": 22.0, "resets_at": None},
+    }
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 0.0, "known_at": 0.0, "usage": ativa, "error": ""},
+            "2": {"at": 0.0, "known_at": 0.0, "usage": inativa, "error": ""},
+        },
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "active_slot", return_value="1"),
+        mock.patch.object(ccx_codex, "sync_active_slot"),
+        mock.patch.object(ccx_codex.time, "time", return_value=1_000.0),
+        mock.patch.object(ccx_codex, "slot_usage", return_value=(nova, "")) as fetch,
+        mock.patch.object(ccx, "write_json"),
+    ):
+        usage_map, _, _ = ccx_codex.collect({})
+
+    assert usage_map == {"1": nova, "2": inativa}
+    fetch.assert_called_once_with("1", fresh["slots"]["1"], True, fresh)
+    assert fresh["usage_cache"]["2"]["inactive"] is True
+
+
+def test_collect_codex_preserva_snapshot_inativo_somente_em_429():
+    snapshot = {"5h": {"pct": 40.0, "resets_at": None}}
+    for error, expected in (
+        ("HTTP 429", snapshot),
+        ("HTTP 401", None),
+        ("TimeoutError", None),
+    ):
+        fresh = {
+            "slots": {"1": {"email": "a@x.com"}},
+            "last_switch": 0,
+            "usage_cache": {
+                "1": {
+                    "at": 0.0,
+                    "known_at": 0.0,
+                    "usage": snapshot,
+                    "error": "",
+                    "inactive": True,
+                }
+            },
+        }
+        with (
+            mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+            mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+            mock.patch.object(ccx_codex, "active_slot", return_value="1"),
+            mock.patch.object(ccx_codex, "sync_active_slot"),
+            mock.patch.object(ccx_codex.time, "time", return_value=1_000.0),
+            mock.patch.object(
+                ccx_codex, "slot_usage", return_value=(None, error)
+            ),
+            mock.patch.object(ccx, "write_json"),
+        ):
+            usage_map, err_map, _ = ccx_codex.collect({})
+        assert usage_map == {"1": expected}
+        assert err_map == {"1": error}
 
 
 def test_sync_codex_nao_descarta_usage_ao_rotacionar_token():
@@ -359,14 +467,26 @@ def test_do_switch_codex_rele_store_e_preserva_estado_concorrente():
 
     stale = {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
     fresh = {
-        "slots": {"1": {"email": "novo", "tokens": {"refresh_token": "novo"}}},
+        "slots": {
+            "1": {
+                "email": "novo",
+                "account_id": "acc-1",
+                "tokens": {"access_token": "access-novo", "refresh_token": "novo"},
+            }
+        },
         "last_switch": 0,
         "usage_cache": {"2": {"at": 1.0, "usage": {"5h": {"pct": 3}}, "error": ""}},
     }
     with (
         mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "switch_lock", return_value=nullcontext()),
         mock.patch.object(ccx_codex, "load_store", return_value=fresh),
         mock.patch.object(ccx_codex, "apply_slot") as apply,
+        mock.patch.object(
+            ccx_codex_bridge,
+            "transactional_switch",
+            side_effect=lambda payload, commit: commit() or True,
+        ) as live_switch,
         mock.patch.object(ccx, "write_json") as write,
         # auto_event escreve com open() direto, entao NAO passa pelo write_json
         # mockado acima: sem este patch o teste sujaria o ~/.ccx/auto.log real
@@ -381,10 +501,166 @@ def test_do_switch_codex_rele_store_e_preserva_estado_concorrente():
     assert registrado.startswith("codex: troca para o slot 1")
     assert "limiar; 1*:9.0%/9.0%" in registrado
     assert "novo" not in registrado, "token/identidade vazou no log"
+    assert live_switch.call_args.args[0] == {
+        "accessToken": "access-novo",
+        "chatgptAccountId": "acc-1",
+    }
     apply.assert_called_once_with(fresh["slots"]["1"])
     write.assert_called_once_with(ccx_codex.STORE, fresh)
     assert stale == fresh
     assert stale["usage_cache"]["2"]["usage"]["5h"]["pct"] == 3
+
+
+def test_external_auth_payload_nunca_leva_refresh_ou_id_token():
+    payload = ccx_codex.external_auth_payload(
+        {
+            "access_token": "access",
+            "refresh_token": "refresh-secreto",
+            "id_token": "id-secreto",
+            "account_id": "acc-1",
+        }
+    )
+    assert payload == {"accessToken": "access", "chatgptAccountId": "acc-1"}
+    assert "refresh-secreto" not in json.dumps(payload)
+    assert "id-secreto" not in json.dumps(payload)
+
+
+def test_do_switch_nao_grava_disco_se_bridge_recusar():
+    stale = {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
+    fresh = {
+        "slots": {
+            "1": {
+                "email": "alvo",
+                "account_id": "acc-1",
+                "tokens": {"access_token": "access", "refresh_token": "refresh"},
+            }
+        },
+        "last_switch": 0,
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "switch_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "apply_slot") as apply,
+        mock.patch.object(ccx, "write_json") as write,
+        mock.patch.object(
+            ccx_codex_bridge,
+            "transactional_switch",
+            side_effect=ccx_codex_bridge.BridgeError("recusado"),
+        ),
+    ):
+        try:
+            ccx_codex.do_switch(stale, "1")
+        except ccx_codex_bridge.BridgeError:
+            pass
+        else:
+            raise AssertionError("falha do bridge deveria cancelar a troca")
+    apply.assert_not_called()
+    write.assert_not_called()
+    assert stale == {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
+
+
+def test_do_switch_renova_alvo_antes_do_hot_swap():
+    now = datetime.now(timezone.utc).timestamp()
+    expired = {
+        "access_token": make_jwt({"exp": now + 10}),
+        "refresh_token": "refresh-antigo",
+    }
+    renewed = {
+        "access_token": make_jwt({"exp": now + 86_400}),
+        "refresh_token": "refresh-novo",
+    }
+    fresh = {
+        "slots": {
+            "1": {
+                "email": "alvo",
+                "account_id": "acc-1",
+                "tokens": expired,
+            }
+        },
+        "last_switch": 0,
+    }
+    captured = {}
+
+    def switch(payload, commit):
+        captured.update(payload)
+        commit()
+        return True
+
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "switch_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "refresh_tokens", return_value=(renewed, "")) as refresh,
+        mock.patch.object(ccx_codex, "apply_slot") as apply,
+        mock.patch.object(ccx, "write_json"),
+        mock.patch.object(ccx, "auto_event"),
+        mock.patch.object(ccx_codex_bridge, "transactional_switch", side_effect=switch),
+    ):
+        ccx_codex.do_switch({}, "1")
+    refresh.assert_called_once_with(expired)
+    assert captured == {
+        "accessToken": renewed["access_token"],
+        "chatgptAccountId": "acc-1",
+    }
+    apply.assert_called_once_with(fresh["slots"]["1"])
+
+
+def test_refresh_do_bridge_reusa_token_ja_rotacionado():
+    fresh = {
+        "slots": {
+            "1": {
+                "email": "a@x.com",
+                "account_id": "acc-1",
+                "tokens": {"access_token": "novo", "refresh_token": "refresh"},
+            }
+        },
+        "last_switch": 0,
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(ccx_codex, "refresh_tokens") as refresh,
+        mock.patch.object(ccx, "write_json") as write,
+    ):
+        payload = ccx_codex.refresh_for_bridge("acc-1", "velho")
+    assert payload == {"accessToken": "novo", "chatgptAccountId": "acc-1"}
+    refresh.assert_not_called()
+    write.assert_not_called()
+
+
+def test_refresh_do_bridge_sincroniza_store_e_auth_da_conta_ativa():
+    old = {"access_token": "velho", "refresh_token": "refresh-velho"}
+    new = {"access_token": "novo", "refresh_token": "refresh-novo"}
+    fresh = {
+        "slots": {
+            "1": {
+                "email": "a@x.com",
+                "account_id": "acc-1",
+                "tokens": old,
+            }
+        },
+        "last_switch": 0,
+    }
+    with (
+        mock.patch.object(ccx_codex, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx_codex, "load_store", return_value=fresh),
+        mock.patch.object(
+            ccx_codex, "refresh_tokens", return_value=(new, "")
+        ) as refresh,
+        mock.patch.object(
+            ccx_codex,
+            "live_identity",
+            return_value=(old, {"account_id": "acc-1"}),
+        ),
+        mock.patch.object(ccx_codex, "apply_slot") as apply,
+        mock.patch.object(ccx, "write_json") as write,
+    ):
+        payload = ccx_codex.refresh_for_bridge("acc-1", "velho")
+    refresh.assert_called_once_with(old, timeout=7.0)
+    apply.assert_called_once_with(fresh["slots"]["1"])
+    write.assert_called_once_with(ccx_codex.STORE, fresh)
+    assert payload == {"accessToken": "novo", "chatgptAccountId": "acc-1"}
 
 
 def test_window_label_arredonda_horas_e_dias():

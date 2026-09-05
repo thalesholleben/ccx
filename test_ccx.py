@@ -42,12 +42,38 @@ def test_pick_target():
     # acima do limiar mas nenhuma travada: cai para a menos pior
     m = {"1": usage(99, 99, 1), "2": usage(90, 90, 2)}
     assert ccx.pick_target(m, 85, "consume-first") == "2"
+    # diferenca menor que 5 pontos: consume-first prefere o semanal mais proximo
+    m = {"1": usage(94, 60, 1), "2": usage(90, 60, 100)}
+    assert ccx.pick_target(m, 85, "consume-first") == "1"
+    # exatamente 5 pontos nao e empate: fica com a conta mais folgada
+    m = {"1": usage(95, 60, 1), "2": usage(90, 60, 100)}
+    assert ccx.pick_target(m, 85, "consume-first") == "2"
     # o caso real: 5h travada em 100 vs semanal em 97 que ainda atende
     m = {"1": usage(100, 78, 65), "2": usage(30, 97, 48)}
     assert ccx.pick_target(m, 85, "consume-first") == "2"
-    # travada de vez de todos os lados: ninguem
+    # travadas de todos os lados: estaciona na que libera primeiro
     m = {"1": usage(100, 50, 1), "2": usage(50, 100, 2)}
-    assert ccx.pick_target(m, 85, "consume-first") is None
+    assert ccx.pick_target(m, 85, "consume-first") == "1"
+    # se uma conta tem duas janelas travadas, ela so volta no reset mais tarde
+    m = {"1": usage(100, 100, 5, h5_in_h=1), "2": usage(100, 50, 9, h5_in_h=2)}
+    assert ccx.pick_target(m, 85, "consume-first") == "2"
+    # enquanto todas estao travadas, vence quem libera primeiro sem tolerancia
+    base = datetime.now(timezone.utc) + timedelta(hours=1)
+    m = {
+        "1": {
+            "5h": {"pct": 100, "resets_at": (base + timedelta(minutes=4)).isoformat()},
+            "7d": {"pct": 10, "resets_at": (base + timedelta(days=1)).isoformat()},
+        },
+        "2": {
+            "5h": {"pct": 100, "resets_at": base.isoformat()},
+            "7d": {"pct": 10, "resets_at": (base + timedelta(days=5)).isoformat()},
+        },
+    }
+    assert ccx.pick_target(m, 85, "consume-first") == "2"
+    # depois que as duas liberam, a diferenca <5 volta a favorecer o semanal
+    m["1"]["5h"] = {"pct": 0, "resets_at": None}
+    m["2"]["5h"] = {"pct": 0, "resets_at": None}
+    assert ccx.pick_target(m, 85, "consume-first") == "1"
     # com alguem abaixo do limiar, o fallback nao entra em cena
     m = {"1": usage(99, 99, 1), "2": usage(10, 10, 200)}
     assert ccx.pick_target(m, 85, "consume-first") == "2"
@@ -58,6 +84,103 @@ def test_pick_target():
     # sem resets_at vai para o fim da fila, nao para o inicio
     m = {"1": {"5h": {"pct": 10}, "7d": {"pct": 10}}, "2": usage(50, 50, 200)}
     assert ccx.pick_target(m, 85, "consume-first") == "2"
+
+
+def test_limiar_padrao_antecipa_rotacao_do_cenario_real():
+    """Com o limiar padrao, 61% nao deve reter uma conta com reset mais distante."""
+    m = {
+        "1": usage(61, 23, 72),
+        "3": usage(63, 7, 120),
+        "4": usage(67, 19, 24),
+    }
+    assert ccx.CLAUDE_DEFAULT_THRESHOLD == 80.0
+    assert ccx.CLAUDE_DEFAULT_COOLDOWN_S == 60
+    assert ccx.pick_target(m, ccx.CLAUDE_DEFAULT_THRESHOLD, "consume-first") == "4"
+
+
+def test_usage_inclui_limite_semanal_por_modelo():
+    raw = {
+        "five_hour": {"utilization": 12, "resets_at": "2026-09-05T20:00:00Z"},
+        "seven_day": {"utilization": 25, "resets_at": "2026-09-10T20:00:00Z"},
+        "limits": [
+            {
+                "kind": "weekly_scoped",
+                "percent": 76,
+                "resets_at": "2026-09-11T20:00:00Z",
+                "scope": {"model": {"display_name": "Sonnet"}},
+            },
+            {
+                "kind": "weekly_scoped",
+                "percent": 100,
+                "resets_at": "2026-09-12T20:00:00Z",
+                "scope": {"model": {"display_name": "Opus"}},
+            },
+            {"kind": "other", "percent": 0},
+        ],
+    }
+    with mock.patch.object(ccx, "http_json", return_value=raw):
+        parsed = ccx.fetch_usage("nao-importa")
+    assert parsed["modelo"] == {
+        "pct": 100.0,
+        "resets_at": "2026-09-12T20:00:00Z",
+        "name": "Opus",
+    }
+    assert ccx.utilization(parsed) == 100.0
+    assert ccx.available_at(parsed) == datetime(2026, 9, 12, 20, tzinfo=timezone.utc)
+
+
+def test_limite_por_modelo_desempata_pelo_reset_mais_tarde():
+    raw = {
+        "five_hour": {"utilization": 10, "resets_at": None},
+        "limits": [
+            {
+                "kind": "weekly_scoped",
+                "percent": 100,
+                "resets_at": "2026-09-11T20:00:00Z",
+                "scope": {"model": {"display_name": "primeiro"}},
+            },
+            {
+                "kind": "weekly_scoped",
+                "percent": 100,
+                "resets_at": "2026-09-13T20:00:00Z",
+                "scope": {"model": {"display_name": "ultimo"}},
+            },
+        ],
+    }
+    with mock.patch.object(ccx, "http_json", return_value=raw):
+        parsed = ccx.fetch_usage("nao-importa")
+    assert parsed["modelo"]["name"] == "ultimo"
+    assert parsed["modelo"]["resets_at"] == "2026-09-13T20:00:00Z"
+
+
+def test_limite_por_modelo_aceita_nome_utilization_da_api():
+    raw = {
+        "limits": [
+            {
+                "kind": "weekly_scoped",
+                "utilization": 87.5,
+                "resets_at": "2026-09-13T20:00:00Z",
+            }
+        ]
+    }
+    with mock.patch.object(ccx, "http_json", return_value=raw):
+        parsed = ccx.fetch_usage("nao-importa")
+    assert parsed["modelo"]["pct"] == 87.5
+
+
+def test_limite_por_modelo_tira_conta_da_rotacao():
+    saturada = usage(10, 10, 100)
+    saturada["modelo"] = {"pct": 100, "resets_at": "2026-09-12T20:00:00Z"}
+    livre = usage(20, 20, 100)
+    assert ccx.pick_target({"1": saturada, "2": livre}, 80, "best") == "2"
+
+
+def test_auto_claude_usa_calibracao_propria():
+    received = []
+    with mock.patch.object(ccx, "cmd_auto", side_effect=lambda args: received.append(args) or 0):
+        assert ccx.main(["auto", "--once"]) == 0
+    assert received[0].threshold == 80.0
+    assert received[0].cooldown == 60
 
 
 def test_swap_preserva_mcp():
@@ -189,6 +312,8 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
     ):
         assert ccx.cmd_status(SimpleNamespace(threshold=85, strategy="consume-first")) == 0
     texto = saida.getvalue()
+    for label in ("uso 5h", "reset 5h", "uso 7d", "reset 7d", "uso mod", "reset mod"):
+        assert label in texto
     assert "recomenda o slot 1" in texto
     assert "troca pendente" in texto
     assert "proxima checagem" not in texto
@@ -285,6 +410,28 @@ def test_check_once_troca_na_hora_quando_a_ativa_esgotou():
     assert codigo == 0, "deveria ter trocado apesar do cooldown"
     assert switch.call_args.args[1] == "1"
     assert switch.call_args.kwargs["reason"].startswith("ativa esgotada; ")
+
+
+def test_check_once_estaciona_no_primeiro_reset_quando_todas_esgotaram():
+    store = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": time.time(),
+    }
+    cotas = {
+        "1": usage(100, 40, 100, h5_in_h=4),
+        "2": usage(100, 50, 100, h5_in_h=1),
+    }
+    args = SimpleNamespace(threshold=80, strategy="consume-first", poll=60, cooldown=300)
+    with (
+        mock.patch.object(ccx, "load_store", return_value=store),
+        mock.patch.object(ccx, "collect", return_value=(cotas, {"1": "", "2": ""}, "1")),
+        mock.patch.object(ccx, "do_switch") as switch,
+        redirect_stdout(StringIO()),
+    ):
+        code, _ = ccx.check_once(args)
+    assert code == 0
+    assert switch.call_args.args == (store, "2")
+    assert switch.call_args.kwargs["reason"].startswith("proximo reset; ")
 
 
 def test_check_once_respeita_cooldown_com_ativa_saudavel():
@@ -391,7 +538,7 @@ def test_check_once_troca_com_429_se_a_ativa_ja_foi_confirmada_esgotada():
     switch.assert_called_once()
     assert switch.call_args.args == (store, "2")
     # O motivo carrega o snapshot da decisao; o formato exato e do check_once.
-    assert switch.call_args.kwargs["reason"].startswith("limiar; ")
+    assert switch.call_args.kwargs["reason"].startswith("ativa esgotada; ")
 
 
 def test_check_once_respeita_slot_fixado_sem_consultar_cota():
@@ -446,7 +593,7 @@ def test_collect_rele_cache_sob_lock_e_nao_repete_usage():
         "slots": {"1": {"email": "a@x.com"}},
         "last_switch": 0,
         "usage_cache": {
-            "1": {"at": 100.0, "usage": conhecida, "error": ""},
+            "1": {"at": 100.0, "usage": conhecida, "error": "", "inactive": False},
         },
     }
     stale = {"slots": {"1": {"email": "a@x.com"}}, "last_switch": 0}
@@ -464,6 +611,31 @@ def test_collect_rele_cache_sob_lock_e_nao_repete_usage():
     assert (usage_map, err_map, active) == ({"1": conhecida}, {"1": ""}, "1")
     fetch.assert_not_called()
     assert stale["usage_cache"] == fresh["usage_cache"]
+
+
+def test_collect_revalida_cache_legado_sem_marca_inactive():
+    antiga = usage(3, 3, 100)
+    nova = usage(8, 8, 100)
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 990.0, "known_at": 990.0, "usage": antiga, "error": ""}
+        },
+    }
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=1_000.0),
+        mock.patch.object(ccx, "slot_usage", return_value=(nova, "")) as fetch,
+        mock.patch.object(ccx, "write_json"),
+    ):
+        usage_map, _, _ = ccx.collect({})
+    fetch.assert_called_once()
+    assert usage_map == {"1": nova}
+    assert fresh["usage_cache"]["1"]["inactive"] is False
 
 
 def test_collect_atualiza_cache_vencido():
@@ -494,7 +666,130 @@ def test_collect_atualiza_cache_vencido():
         "usage": nova,
         "error": "",
         "known_at": 500.0,
+        "inactive": False,
     }
+
+
+def test_collect_consulta_so_ativa_e_memoriza_inativas():
+    antiga_ativa = usage(70, 20, 100)
+    inativa = usage(35, 10, 100)
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {"at": 0.0, "known_at": 0.0, "usage": antiga_ativa, "error": ""},
+            "2": {"at": 0.0, "known_at": 0.0, "usage": inativa, "error": ""},
+        },
+    }
+    nova_ativa = usage(75, 21, 100)
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=1_000.0),
+        mock.patch.object(ccx, "slot_usage", return_value=(nova_ativa, "")) as fetch,
+        mock.patch.object(ccx, "write_json"),
+    ):
+        usage_map, err_map, active = ccx.collect({})
+
+    assert (usage_map, err_map, active) == (
+        {"1": nova_ativa, "2": inativa},
+        {"1": "", "2": ""},
+        "1",
+    )
+    fetch.assert_called_once_with("1", fresh["slots"]["1"], True, fresh)
+    assert fresh["usage_cache"]["2"]["inactive"] is True
+
+
+def test_cota_inativa_aplica_reset_local_sem_consultar_api():
+    store = {
+        "usage_cache": {
+            "1": {
+                "at": 1.0,
+                "usage": {
+                    "5h": {"pct": 100, "resets_at": "2026-09-05T17:00:00Z"},
+                    "7d": {"pct": 30, "resets_at": "2026-09-10T17:00:00Z"},
+                },
+                "error": "",
+            }
+        }
+    }
+    now = datetime(2026, 9, 5, 18, tzinfo=timezone.utc).timestamp()
+    projected = ccx.inactive_slot_usage(store, "1", now)
+    assert projected["5h"]["pct"] == 0.0
+    assert projected["7d"]["pct"] == 30
+    assert store["usage_cache"]["1"]["at"] == 1.0
+
+
+def test_ativa_preserva_snapshot_inativo_quando_usage_da_429():
+    snapshot = usage(40, 15, 100)
+    fresh = {
+        "slots": {"1": {"email": "a@x.com"}},
+        "last_switch": 0,
+        "usage_cache": {
+            "1": {
+                "at": 0.0,
+                "known_at": 0.0,
+                "usage": snapshot,
+                "error": "",
+                "inactive": True,
+            }
+        },
+    }
+    with (
+        mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+        mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value="1"),
+        mock.patch.object(ccx, "sync_active_slot"),
+        mock.patch.object(ccx.time, "time", return_value=1_000.0),
+        mock.patch.object(ccx, "slot_usage", return_value=(None, "HTTP 429")),
+        mock.patch.object(ccx, "write_json"),
+    ):
+        usage_map, err_map, _ = ccx.collect({})
+
+    assert usage_map == {"1": snapshot}
+    assert err_map == {"1": "HTTP 429"}
+    assert fresh["usage_cache"]["1"]["usage"] == snapshot
+    assert fresh["usage_cache"]["1"]["known_at"] == 1_000.0
+    assert fresh["usage_cache"]["1"]["inactive"] is False
+
+
+def test_ativa_nao_mascara_erro_diferente_de_429_com_snapshot_inativo():
+    snapshot = usage(40, 15, 100)
+    for error in ("HTTP 401", "TimeoutError"):
+        fresh = {
+            "slots": {"1": {"email": "a@x.com"}},
+            "last_switch": 0,
+            "usage_cache": {
+                "1": {
+                    "at": 0.0,
+                    "known_at": 0.0,
+                    "usage": snapshot,
+                    "error": "",
+                    "inactive": True,
+                }
+            },
+        }
+        with (
+            mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
+            mock.patch.object(ccx, "load_store", return_value=fresh),
+            mock.patch.object(ccx, "active_slot", return_value="1"),
+            mock.patch.object(ccx, "sync_active_slot"),
+            mock.patch.object(ccx.time, "time", return_value=1_000.0),
+            mock.patch.object(ccx, "slot_usage", return_value=(None, error)),
+            mock.patch.object(ccx, "write_json"),
+        ):
+            usage_map, err_map, _ = ccx.collect({})
+        assert usage_map == {"1": None}
+        assert err_map == {"1": error}
+
+
+def test_todas_travadas_exige_cota_conhecida_de_todos_os_slots():
+    assert ccx.all_known_usage_blocked({"1": usage(100, 20, 100)})
+    assert not ccx.all_known_usage_blocked(
+        {"1": usage(100, 20, 100), "2": None}
+    )
 
 
 def test_sync_rotacao_de_token_nao_descarta_usage_recente():
@@ -520,7 +815,10 @@ def test_do_switch_rele_store_e_preserva_refresh_e_cache_concorrentes():
     fresh = {
         "slots": {"1": {"email": "novo", "oauth": {"refreshToken": "novo"}}},
         "last_switch": 0,
-        "usage_cache": {"2": {"at": 1.0, "usage": usage(2, 3, 100), "error": ""}},
+        "usage_cache": {
+            "1": {"at": 1.0, "usage": usage(4, 5, 100), "error": ""},
+            "2": {"at": 1.0, "usage": usage(2, 3, 100), "error": ""},
+        },
     }
     with (
         mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
@@ -535,6 +833,7 @@ def test_do_switch_rele_store_e_preserva_refresh_e_cache_concorrentes():
     apply.assert_called_once_with(fresh["slots"]["1"])
     write.assert_called_once_with(ccx.STORE, fresh)
     assert stale == fresh
+    assert stale["usage_cache"]["1"]["usage"]["5h"]["pct"] == 4
     assert stale["usage_cache"]["2"]["usage"]["5h"]["pct"] == 2
 
 
