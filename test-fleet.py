@@ -365,7 +365,22 @@ class FleetTests(unittest.TestCase):
             self.assertIn('Read,Glob,Grep',cmd)
             self.assertNotIn('--dangerously-skip-permissions',cmd)
             self.assertIn('--verbose',cmd)
-        self.assertTrue(providers.executable('codex').endswith('.exe') if os.name=='nt' else providers.executable('codex'))
+
+    def test_native_cli_resolution_without_installed_provider(self):
+        directory=self.base/'synthetic-bin';directory.mkdir()
+        native=directory/('codex.exe' if os.name=='nt' else 'codex')
+        native.touch();native.chmod(0o700)
+        with patch.dict(os.environ,{'PATH':str(directory)}):
+            self.assertEqual(Path(providers.executable('codex')),native)
+            native.unlink()
+            with self.assertRaisesRegex(FileNotFoundError,'native_cli_missing'):
+                providers.executable('codex')
+            if os.name=='nt':
+                (directory/'codex.cmd').write_text('@echo off\n')
+                arch='aarch64' if os.environ.get('PROCESSOR_ARCHITECTURE')=='ARM64' else 'x86_64'
+                packaged=directory/'node_modules/@openai/codex/node_modules/@openai/codex-win32-test/vendor'/arch/'bin/codex.exe'
+                packaged.parent.mkdir(parents=True);packaged.touch()
+                self.assertEqual(Path(providers.executable('codex')),packaged)
 
     def test_terminal_and_snapshot_privacy(self):
         self.cell(); self.submit(prompt='PRIVATE-PROMPT')
