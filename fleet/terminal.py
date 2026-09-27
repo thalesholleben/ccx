@@ -152,6 +152,7 @@ def fleet(snapshot, no_color=False):
 def compact(snapshot, no_color=False, width=None):
     """At most three accounts per row; only the two main quota windows."""
     out=Terminal(no_color,width)
+    out.width=max(1,min(out.width,width if width is not None else shutil.get_terminal_size((100,30)).columns))
     columns=3 if out.width>=90 else 2 if out.width>=60 else 1
     gap='  '
     size=(out.width-len(gap)*(columns-1))//columns
@@ -182,9 +183,9 @@ def compact(snapshot, no_color=False, width=None):
                     if used is None:
                         bar=('·' if out.unicode else '.')*barsize
                     else:
-                        filled=round(used/100*barsize)
+                        filled=round(max(0,min(100,used))/100*barsize)
                         bar=('█' if out.unicode else '#')*filled+('░' if out.unicode else '.')*(barsize-filled)
-                    content=f'{title} {bar} {amount:>4} {state}'.rstrip().ljust(size)
+                    content=f'{title} {bar} {amount:>4} {state}'.rstrip()[:size].ljust(size)
                     code='90' if used is None else '31' if used>=90 else '33' if used>=70 else '32'
                     parts.append(out.paint(content,code))
                 print(gap.join(parts).encode(out.encoding,errors='replace').decode(out.encoding))

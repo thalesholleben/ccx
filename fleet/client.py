@@ -1,11 +1,12 @@
 """Bounded transport for existing protocol runners. No CLI or global login fallback."""
 import subprocess
+import os
 import sqlite3
 import time
 
 import ccx
 from . import service
-from .store import Store, TERMINAL
+from .store import Store, TERMINAL, GUARDS
 
 
 def busy(error):
@@ -31,6 +32,14 @@ def cancel_and_confirm(store,job_id,deadline):
 
 
 def execute(provider, prompt, cwd, model, *, timeout=3600, root=None, on_submit=None, **options):
+    options['guards']={**{key:os.environ[key] for key in GUARDS if key in os.environ},**(options.get('guards') or {})}
+    try:
+        return _execute(provider,prompt,cwd,model,timeout=timeout,root=root,on_submit=on_submit,**options)
+    except sqlite3.Error as error:
+        raise RuntimeError('ccx_database_error:'+type(error).__name__) from error
+
+
+def _execute(provider, prompt, cwd, model, *, timeout, root, on_submit, **options):
     store=Store(root)
     service.start(store)
     job_id=store.submit(provider,prompt,cwd,model,**options)

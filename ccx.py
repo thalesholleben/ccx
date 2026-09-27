@@ -1555,8 +1555,10 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv=list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0]=='hook':
+        return 0 # Retired Stop hooks must never block the end of a Claude turn.
     from fleet.cli import main as fleet_main
-    if argv and argv[0] in ('auto','switch','hook','add'):
+    if argv and argv[0] in ('auto','switch','add'):
         print('CCX: rotação global aposentada. Use cell add/login ou run --cell ID na frota.',file=sys.stderr)
         return 2
     return fleet_main(argv[1:] if argv and argv[0]=='fleet' else argv or ['status'])

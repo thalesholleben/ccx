@@ -215,9 +215,12 @@ def fetch(provider, auth):
     return parse_usage(provider, ccx.http_json(urllib.request.Request(url, headers=headers), timeout=8))
 
 
-def poll_cell(store, cell_id, now=None):
+def poll_cell(store, cell_id, now=None, *, idle_only=False):
     now = time.time() if now is None else now
     cell = store.one('SELECT * FROM cells WHERE id=?', (cell_id,))
+    if idle_only and (cell['paused'] or cell['next_poll']>now or store.rows(
+            'SELECT id FROM workers WHERE cell_id=? AND (job_id IS NOT NULL OR login=1)',(cell_id,))):
+        return
     workers = store.rows("SELECT * FROM workers WHERE cell_id=? AND auth='ready' AND retry_after<=? ORDER BY id", (cell_id,now))
     if not workers:
         with store.transaction() as db:
@@ -229,10 +232,12 @@ def poll_cell(store, cell_id, now=None):
             with store.worker_lock(worker['id']):
                 current = store.worker(worker['id'])
                 if current['job_id'] or current['login']:
+                    if idle_only:return
                     auth = credentials(cell['provider'], store.home(worker['id']))
                 else:
                     auth = prepare_idle(store, worker['id'])
         except BlockingIOError:
+            if idle_only:return
             auth = credentials(cell['provider'], store.home(worker['id']))
         if cell['identity'] != auth[5]:
             raise AuthError('identity_mismatch')

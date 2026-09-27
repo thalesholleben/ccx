@@ -346,7 +346,7 @@ class Store:
                restricted=False, ignore_user_config=False):
         if provider not in ('claude', 'codex') or not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 200_000:
             raise ValueError('invalid_prompt_or_provider')
-        efforts = ('low','medium','high','max') if provider=='claude' else ('low','medium','high','xhigh')
+        efforts = ('low','medium','high','xhigh','max') if provider=='claude' else ('low','medium','high','xhigh')
         if not MODEL.fullmatch(model) or effort not in efforts:
             raise ValueError('invalid_model_or_effort')
         if permission not in ('read-only', 'write') or type(priority) is not int or not 0 <= priority <= 10:
@@ -365,7 +365,7 @@ class Store:
         if any(key not in GUARDS or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,100}', str(val)) for key, val in guards.items()):
             raise ValueError('invalid_guards')
         if allowed_tools is not None and (provider != 'claude' or not isinstance(allowed_tools, list) or
-                any(not isinstance(tool,str) or not re.fullmatch(r'(Read|Edit|Write|Bash|Glob|Grep|Skill)(?:\([^\r\n]{1,1000}\))?',tool) for tool in allowed_tools)):
+                any(not isinstance(tool,str) or not re.fullmatch(r'(Read|Edit|Write|Bash|Glob|Grep|Skill)(?:\([^,\r\n]{1,1000}\))?',tool) for tool in allowed_tools)):
             raise ValueError('unsupported_tools')
         if provider == 'claude' and permission == 'read-only' and allowed_tools is not None and any(tool not in ('Read','Glob','Grep') for tool in allowed_tools):
             raise ValueError('read_only_tools_required')

@@ -580,7 +580,10 @@ class FleetTests(unittest.TestCase):
             self.assertEqual(ccx.main(['--root',str(self.store.root),'stats','--no-color']),0)
         self.assertIn('new-account',stream.getvalue())
         self.assertNotIn('TAREFAS',stream.getvalue())
-        for action in ('auto','switch','hook','add'):
+        with contextlib.redirect_stdout(io.StringIO()) as stdout,contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(ccx.main(['hook']),0)
+        self.assertEqual(stdout.getvalue()+stderr.getvalue(),'')
+        for action in ('auto','switch','add'):
             with contextlib.redirect_stderr(io.StringIO()):self.assertEqual(ccx.main([action]),2)
 
     def test_slim_status_keeps_three_accounts_and_stale_warning(self):
@@ -613,6 +616,50 @@ class FleetTests(unittest.TestCase):
             else:self.assertEqual(json.loads(args[args.index('--json-schema')+1]),schema)
         with self.assertRaisesRegex(ValueError,'invalid_cli_permission'):
             self.store.submit('claude','Test',str(self.base),'model',permission='read-only',cli_mode='bypassPermissions')
+
+    def test_review_compatibility_regressions(self):
+        from fleet import client
+        with patch('fleet.client.Store',side_effect=sqlite3.OperationalError('private database path')):
+            with self.assertRaisesRegex(RuntimeError,'^ccx_database_error:OperationalError$'):
+                client.execute('claude','Test',str(self.base),'model',root=self.store.root)
+        with patch('fleet.client.service.start'),patch.dict(os.environ,{'ENTERPRISE_EXECUTOR_DEPTH':'1'}):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                client.execute('claude','Test',str(self.base),'model',root=self.store.root,timeout=.1,
+                    effort='xhigh',guards={'CROSS_REVIEW_DEPTH':'1'})
+        row=self.store.one('SELECT * FROM jobs')
+        options=json.loads(row['options'])
+        self.assertEqual(row['state'],'cancelled')
+        self.assertEqual(options['effort'],'xhigh')
+        self.assertEqual(options['guards']['ENTERPRISE_EXECUTOR_DEPTH'],'1')
+        with patch('fleet.providers.executable',return_value='native.exe'):
+            argv=providers.command('claude',options,str(self.base),self.base/'output.txt')
+        self.assertEqual(argv[argv.index('--effort')+1],'xhigh')
+        with self.assertRaisesRegex(ValueError,'unsupported_tools'):
+            self.submit(permission='write',allowed_tools=['Bash(git diff a,b)'])
+
+    def test_status_refresh_respects_idle_profiles_and_backoff(self):
+        from fleet.cli import main
+        for name in ('ready','backoff','paused','busy'):
+            self.cell(name)
+        with self.store.transaction() as db:
+            db.execute('UPDATE cells SET next_poll=0')
+            db.execute("UPDATE cells SET next_poll=?,error='http_429' WHERE id='backoff'",(time.time()+300,))
+            db.execute("UPDATE cells SET paused=1 WHERE id='paused'")
+            db.execute("UPDATE workers SET login=1 WHERE cell_id='busy'")
+        with patch('fleet.providers.prepare_idle',return_value=(None,)*5+('identity-ready',)),patch('fleet.providers.fetch',return_value=[]) as fetch:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(['--root',str(self.store.root),'status','--refresh','--json']),0)
+            self.assertEqual(fetch.call_count,1)
+        with self.store.transaction() as db:db.execute('UPDATE workers SET login=0')
+
+    def test_compact_narrow_and_over_limit(self):
+        self.cell()
+        snapshot=self.store.snapshot()
+        snapshot['cells'][0]['windows'][0]['used']=120
+        for width in (8,20,24):
+            with contextlib.redirect_stdout(io.StringIO()) as stream:
+                terminal.compact(snapshot,True,width)
+            self.assertTrue(all(len(line)<=width for line in stream.getvalue().splitlines()))
         output=runner.Output('claude')
         output.accept({'type':'result','subtype':'success','is_error':False,'structured_output':{'ok':True}})
         self.assertEqual(json.loads(output.text),{'ok':True})

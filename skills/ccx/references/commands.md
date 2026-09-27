@@ -37,7 +37,7 @@ python ccx-fleet.py cancel ID_DA_TAREFA
 ```
 
 - `--model`: identificador compatível com o CLI instalado; preserve escolha explícita.
-- `--effort`: Claude low/medium/high/max; Codex low/medium/high/xhigh.
+- `--effort`: Claude low/medium/high/xhigh/max; Codex low/medium/high/xhigh.
 - `--cost`: estimativa de 0,1 a 80 pontos equivalentes x1, padrão 15.
 - `--priority`: 0 a 10; maior primeiro, sem furar regras de cota/perfil/pasta.
 - `--cell`: somente aquela conta, sem fallback silencioso.
@@ -64,6 +64,8 @@ Não revoga tokens no provedor nem cancela assinatura. Só remover quando pedido
 `ccx.py stats` é um alias do status compacto da frota: três contas por linha,
 agrupadas por provedor. `status --details` mostra perfis, reservas e tarefas.
 `status --refresh` atualiza perfis ociosos sob o mesmo lock de login/execução.
+Respeita o próximo horário de coleta e o backoff de erro; não força uma chamada
+por conta a cada comando nem consulta contas pausadas/em uso nesse modo.
 `cache` é leitura vencida, nunca cota zero. `n/d` é janela não informada.
 Comandos globais `auto`, `switch` e `hook` foram aposentados; não escolha conta por eles.
 

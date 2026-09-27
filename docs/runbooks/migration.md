@@ -3,6 +3,8 @@
 Fleet mode is the only operational interface. Global rotation commands are
 retired; `ccx.py stats` now reads the fleet. The old installers accept only
 `-Uninstall`. Shared Python helpers remain for parsing and file/process handling.
+The retired `hook` command is a silent successful no-op so an old Stop hook
+cannot block a session while its configuration is being removed.
 
 ## Updating an existing fleet installation
 
