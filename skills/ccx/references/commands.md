@@ -66,7 +66,9 @@ agrupadas por provedor. `status --details` mostra perfis, reservas e tarefas.
 `status --refresh` atualiza perfis ociosos sob o mesmo lock de login/execução.
 Respeita o próximo horário de coleta e o backoff de erro; não força uma chamada
 por conta a cada comando nem consulta contas pausadas/em uso nesse modo.
-`cache` é leitura vencida, nunca cota zero. `n/d` é janela não informada.
+Ao lado do uso, `reset 2.5h` informa as horas restantes. `reset n/d` é horário
+não informado; `reset pend.`, horário passado aguardando nova leitura.
+`--details` mostra a idade da medição; leitura vencida nunca é cota zero.
 Comandos globais `auto`, `switch` e `hook` foram aposentados; não escolha conta por eles.
 
 Runners podem usar `fleet.client.execute` e o transporte opcional da skill.

@@ -102,6 +102,8 @@ Validação: `python scripts/check.py`. Detalhes, limites e contribuição no
 
 `python ccx.py stats` mostra até três contas por linha, Claude em cima e Codex
 embaixo, com os limites de sessão e semana. Amarelo a partir de 70%, vermelho a
-partir de 90%. Terminais estreitos usam uma ou duas colunas. `cache` indica leitura
-com mais de dez minutos; `n/d`, janela não informada pelo provedor. Use `--refresh`
-para medir perfis ociosos, `--details` para diagnóstico e `--json` para integrações.
+partir de 90%. Terminais estreitos usam uma ou duas colunas. Cada limite mostra
+uso e tempo até o reset em horas, por exemplo `50% reset 2.5h`. `reset n/d`
+significa reset não informado; `reset pend.`, horário já passado aguardando nova
+leitura. Use `--refresh` para medir perfis ociosos elegíveis, `--details` para
+diagnóstico e idade da leitura, e `--json` para integrações.

@@ -174,12 +174,14 @@ def compact(snapshot, no_color=False, width=None):
                 for cell in row:
                     windows=[w for w in cell['windows'] if not w.get('model') and (w['seconds']>86400)==weekly]
                     window=(max if weekly else min)(windows,key=lambda w:w['seconds'],default=None)
-                    stale=not cell['observed'] or not 0<=snapshot['at']-cell['observed']<=600
-                    state='pausada' if cell['paused'] else 'login' if cell['auth']!='ready' else 'cache' if stale else ''
+                    reset=window.get('reset') if window else None
+                    remaining=reset-snapshot['at'] if reset is not None else None
+                    countdown='n/d' if remaining is None else 'pend.' if remaining<=0 else f'{remaining/3600:.1f}h'
+                    state='pausada' if cell['paused'] else 'login' if cell['auth']!='ready' else 'reset '+countdown
                     title='7d' if weekly else '5h'
                     used=window['used'] if window else None
                     amount=f'{used:.0f}%' if used is not None else 'n/d'
-                    barsize=max(3,size-18)
+                    barsize=max(3,size-9-len(state))
                     if used is None:
                         bar=('·' if out.unicode else '.')*barsize
                     else:

@@ -586,18 +586,29 @@ class FleetTests(unittest.TestCase):
         for action in ('auto','switch','add'):
             with contextlib.redirect_stderr(io.StringIO()):self.assertEqual(ccx.main([action]),2)
 
-    def test_slim_status_keeps_three_accounts_and_stale_warning(self):
+    def test_slim_status_keeps_three_accounts_and_reset_hours(self):
         for name in ('account-a','account-b','account-c'):self.cell(name)
         snapshot=self.store.snapshot()
         snapshot['cells'][1]['observed']=1
+        for cell in snapshot['cells']:
+            cell['windows'][0]['reset']=snapshot['at']+9000
+            cell['windows'][1]['reset']=snapshot['at']+45*3600
         for width in (32,64,100,120):
             with contextlib.redirect_stdout(io.StringIO()) as stream:terminal.compact(snapshot,True,width)
             lines=stream.getvalue().splitlines()
             self.assertTrue(all(len(line)<=width for line in lines))
-            self.assertIn('cache',stream.getvalue())
+            self.assertNotIn('cache',stream.getvalue())
+            self.assertIn('reset 2.5h',stream.getvalue())
+            self.assertIn('reset 45.0h',stream.getvalue())
             if width>=90:
                 self.assertEqual(len(lines),4)
                 self.assertTrue(all(name in lines[1] for name in ('account-a','account-b','account-c')))
+        snapshot['cells'][0]['windows'][0]['reset']=None
+        snapshot['cells'][1]['windows'][0]['reset']=snapshot['at']-10
+        snapshot['cells'][2]['windows']=[]
+        with contextlib.redirect_stdout(io.StringIO()) as stream:terminal.compact(snapshot,True,100)
+        self.assertIn('reset n/d',stream.getvalue())
+        self.assertIn('reset pend.',stream.getvalue())
 
     def test_protocol_transport_preserves_permissions_schema_and_guards(self):
         schema={'type':'object','properties':{'ok':{'type':'boolean'}},'required':['ok'],'additionalProperties':False}

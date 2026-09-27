@@ -166,7 +166,10 @@ de backoff. Não há nova tentativa automática da tarefa que falhou.
 compacta, com três contas por linha agrupadas por provedor. `--details` inclui
 perfis, reservas e tarefas; `--refresh` mede perfis ociosos. `--no-color` ou
 `NO_COLOR` removem cores, e `--json` fornece dados para integrações. Barras ficam
-amarelas em 70% e vermelhas em 90%; `cache` indica leitura vencida.
+amarelas em 70% e vermelhas em 90%. Ao lado do percentual aparece o tempo até
+o reset em horas: `reset 2.5h`. `reset n/d` indica horário não informado;
+`reset pend.`, horário já passado aguardando nova leitura. A idade da medição
+fica em `--details`.
 
 O painel abre em **Capacidade**, com indicadores slim e todas as contas em cards
 compactos, uso de sessão/semanal e folga estimada. Estado sem leitura nunca aparece

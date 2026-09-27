@@ -105,9 +105,10 @@ read-only; Claude's read-only mode does not enable shell commands. Specify
 `python ccx.py stats` and `python ccx-fleet.py status` show up to three accounts
 per row, grouped by provider, with session and weekly usage only. Bars turn
 amber at 70% and red at 90%. Narrow terminals adapt to one or two columns.
-`cache` means the measurement is older than ten minutes; `n/d` means the provider
-has not reported that window. Use `--refresh` for a fresh read from idle profiles,
-`--details` for diagnostics, or `--json` for integrations.
+Each limit shows its usage and time until reset in hours, such as `50% reset 2.5h`.
+`reset n/d` means no reset was reported; `reset pend.` means the reported time has
+passed and a new reading is needed. Use `--refresh` to update eligible idle profiles,
+`--details` for diagnostics and measurement age, or `--json` for integrations.
 
 ## Capacity and execution
 
