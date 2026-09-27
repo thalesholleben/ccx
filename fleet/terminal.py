@@ -131,7 +131,7 @@ def fleet(snapshot, no_color=False):
         for win in cell['windows']:
             reserved = cell['reserved'].get(win['key'],0)
             name = win.get('model') or duration(win['seconds'])
-            out.line(f"  {name}  {out.bar(win['used'])}", '31' if win['used']>=90 else '36')
+            out.line(f"  {name}  {out.bar(win['used'])}", '31' if win['used']>=90 else '33' if win['used']>=70 else '32')
             out.line(f"    Reservado {reserved:.1f}pp | margem {cell['reserve']:g}pp")
             weight = cell['weight'] if win['seconds']<=86400 and not win.get('model') else cell['weekly_weight']
             free = max(0,100-win['used']-reserved-cell['reserve'])*weight/100
@@ -185,7 +185,7 @@ def compact(snapshot, no_color=False, width=None):
                         filled=round(used/100*barsize)
                         bar=('█' if out.unicode else '#')*filled+('░' if out.unicode else '.')*(barsize-filled)
                     content=f'{title} {bar} {amount:>4} {state}'.rstrip().ljust(size)
-                    code='90' if state else '31' if used is not None and used>=90 else '33' if used is not None and used>=70 else '32'
+                    code='90' if used is None else '31' if used>=90 else '33' if used>=70 else '32'
                     parts.append(out.paint(content,code))
                 print(gap.join(parts).encode(out.encoding,errors='replace').decode(out.encoding))
     if not snapshot['cells']:out.line('Nenhuma conta cadastrada.')
