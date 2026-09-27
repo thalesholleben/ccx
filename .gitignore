@@ -8,3 +8,11 @@ __pycache__/
 .ccx/
 accounts.json
 codex_accounts.json
+
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-*
+installation.json
+skills/ccx/references/local.md

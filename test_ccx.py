@@ -293,8 +293,8 @@ def test_hook_checa_sem_poluir_o_stop():
 def test_status_nao_anuncia_sono_longo_com_troca_pendente():
     store = {
         "slots": {
-            "1": {"email": "a@x.com"},
-            "3": {"email": "c@x.com"},
+            "1": {"email": "a@x.com", "oauth": {"accessToken": "fixture-1"}},
+            "3": {"email": "c@x.com", "oauth": {"accessToken": "fixture-3"}},
         }
     }
     cotas = {
@@ -320,7 +320,8 @@ def test_status_nao_anuncia_sono_longo_com_troca_pendente():
 
 
 def test_status_avisa_monitor_offline_em_vez_de_prometer_troca():
-    store = {"slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}}}
+    store = {"slots": {"1": {"email": "a@x.com", "oauth": {"accessToken": "fixture-1"}},
+                       "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}}}}
     cotas = {"1": usage(5, 5, 100), "2": usage(99, 50, 100)}
     saida = StringIO()
     with (
@@ -342,8 +343,8 @@ def test_status_avisa_monitor_offline_em_vez_de_prometer_troca():
 def test_status_nao_confunde_erro_de_usage_com_conta_esgotada():
     store = {
         "slots": {
-            "2": {"email": "b@x.com"},
-            "3": {"email": "c@x.com"},
+            "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}},
+            "3": {"email": "c@x.com", "oauth": {"accessToken": "fixture-3"}},
         }
     }
     cotas = {"2": usage(88, 38, 100), "3": None}
@@ -395,7 +396,8 @@ def test_cooldown_nao_prende_em_conta_esgotada():
 def test_check_once_troca_na_hora_quando_a_ativa_esgotou():
     """O escape tem que valer no caminho real, nao so no predicado."""
     store = {
-        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "slots": {"1": {"email": "a@x.com", "oauth": {"accessToken": "fixture-1"}},
+                  "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}}},
         "last_switch": time.time(),  # cooldown recem-iniciado
     }
     cotas = {"1": usage(5, 5, 100), "2": usage(100, 40, 100)}
@@ -414,7 +416,8 @@ def test_check_once_troca_na_hora_quando_a_ativa_esgotou():
 
 def test_check_once_estaciona_no_primeiro_reset_quando_todas_esgotaram():
     store = {
-        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "slots": {"1": {"email": "a@x.com", "oauth": {"accessToken": "fixture-1"}},
+                  "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}}},
         "last_switch": time.time(),
     }
     cotas = {
@@ -437,7 +440,8 @@ def test_check_once_estaciona_no_primeiro_reset_quando_todas_esgotaram():
 def test_check_once_respeita_cooldown_com_ativa_saudavel():
     """O escape nao pode virar bypass geral, senao volta o pingue-pongue."""
     store = {
-        "slots": {"1": {"email": "a@x.com"}, "2": {"email": "b@x.com"}},
+        "slots": {"1": {"email": "a@x.com", "oauth": {"accessToken": "fixture-1"}},
+                  "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}}},
         "last_switch": time.time(),
     }
     cotas = {"1": usage(5, 5, 100), "2": usage(40, 40, 100)}
@@ -492,8 +496,8 @@ def test_auto_log_grava_snapshot_sem_vazar_segredo():
 def test_check_once_mantem_ativa_em_qualquer_erro_de_usage():
     store = {
         "slots": {
-            "2": {"email": "b@x.com"},
-            "3": {"email": "c@x.com"},
+            "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}},
+            "3": {"email": "c@x.com", "oauth": {"accessToken": "fixture-3"}},
         },
         "last_switch": 0,
     }
@@ -517,8 +521,8 @@ def test_check_once_mantem_ativa_em_qualquer_erro_de_usage():
 def test_check_once_troca_com_429_se_a_ativa_ja_foi_confirmada_esgotada():
     store = {
         "slots": {
-            "2": {"email": "b@x.com"},
-            "3": {"email": "c@x.com"},
+            "2": {"email": "b@x.com", "oauth": {"accessToken": "fixture-2"}},
+            "3": {"email": "c@x.com", "oauth": {"accessToken": "fixture-3"}},
         },
         "last_switch": 0,
     }
@@ -813,7 +817,7 @@ def test_sync_rotacao_de_token_nao_descarta_usage_recente():
 def test_do_switch_rele_store_e_preserva_refresh_e_cache_concorrentes():
     stale = {"slots": {"1": {"email": "velho"}}, "last_switch": 0}
     fresh = {
-        "slots": {"1": {"email": "novo", "oauth": {"refreshToken": "novo"}}},
+        "slots": {"1": {"email": "novo", "oauth": {"accessToken": "fixture", "refreshToken": "novo"}}},
         "last_switch": 0,
         "usage_cache": {
             "1": {"at": 1.0, "usage": usage(4, 5, 100), "error": ""},
@@ -823,6 +827,7 @@ def test_do_switch_rele_store_e_preserva_refresh_e_cache_concorrentes():
     with (
         mock.patch.object(ccx, "store_lock", return_value=nullcontext()),
         mock.patch.object(ccx, "load_store", return_value=fresh),
+        mock.patch.object(ccx, "active_slot", return_value=None),
         mock.patch.object(ccx, "apply_slot") as apply,
         mock.patch.object(ccx, "write_json") as write,
         mock.patch.object(ccx, "auto_event"),

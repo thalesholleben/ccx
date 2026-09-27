@@ -2,28 +2,15 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "ccx auto (fallback manual)",
-      "detail": "Fallback manual; o monitor permanente do Windows e o padrao para Claude Code",
+      "label": "CCX: capacidade da frota",
+      "detail": "Consulta a frota por células",
       "type": "shell",
       "command": "python",
-      "args": ["ccx.py", "auto"],
-      "isBackground": true,
-      "presentation": {
-        "reveal": "silent",
-        "panel": "dedicated",
-        "group": "ccx",
-        "showReuseMessage": false,
-        "clear": true
-      },
-      "problemMatcher": []
-    },
-    {
-      "label": "ccx_codex auto",
-      "detail": "Monitora a cota das contas Codex CLI e troca antes de bater o limite",
-      "type": "shell",
-      "command": "python",
-      "args": ["ccx_codex.py", "auto"],
-      "isBackground": true,
+      "args": [
+        "ccx-fleet.py",
+        "status"
+      ],
+      "isBackground": false,
       "presentation": {
         "reveal": "silent",
         "panel": "dedicated",

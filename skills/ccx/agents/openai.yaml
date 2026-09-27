@@ -1,0 +1,6 @@
+interface:
+  display_name: "CCX"
+  short_description: "Contas, capacidade e despacho de agentes pelo CCX"
+  default_prompt: "Use $ccx para conferir a capacidade e despachar a tarefa na conta apropriada."
+policy:
+  allow_implicit_invocation: true

@@ -676,17 +676,21 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("Nenhuma conta. Rode 'codex login' e depois 'ccx_codex add'.")
         return 1
     usage_map, err_map, active = collect(store)
-    lbl5, lbl7 = _column_labels(usage_map)
-    print(f"{'':2} {'conta':28} {lbl5:>6} {'reset':>7} {lbl7:>6} {'reset':>7}")
-    for key, slot in store["slots"].items():
-        usage = usage_map[key]
-        mark = "*" if key == active else " "
-        tag = f"  {err_map[key]}" if err_map[key] else ""
-        print(
-            f"{mark}{key} {slot['email'][:28]:28} "
-            f"{ccx.fmt_window(usage, '5h')} {ccx.fmt_reset(usage, '5h'):>7} "
-            f"{ccx.fmt_window(usage, '7d')} {ccx.fmt_reset(usage, '7d'):>7}{tag}"
-        )
+    from fleet import terminal
+    if terminal.visual(args):
+        terminal.legacy(store, usage_map, err_map, active, "codex", args, _column_labels(usage_map))
+    else:
+        lbl5, lbl7 = _column_labels(usage_map)
+        print(f"{'':2} {'conta':28} {lbl5:>6} {'reset':>7} {lbl7:>6} {'reset':>7}")
+        for key, slot in store["slots"].items():
+            usage = usage_map[key]
+            mark = "*" if key == active else " "
+            tag = f"  {err_map[key]}" if err_map[key] else ""
+            print(
+                f"{mark}{key} {slot['email'][:28]:28} "
+                f"{ccx.fmt_window(usage, '5h')} {ccx.fmt_reset(usage, '5h'):>7} "
+                f"{ccx.fmt_window(usage, '7d')} {ccx.fmt_reset(usage, '7d'):>7}{tag}"
+            )
     pinned = pinned_slot(store)
     if pinned:
         print(f"\n-> slot {pinned} fixado; use 'ccx_codex auto --pin off' para liberar a rotação")
@@ -952,6 +956,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_add)
 
     p = sub.add_parser("status", help="as contas lado a lado")
+    p.add_argument("--visual", action="store_true")
+    p.add_argument("--no-color", action="store_true")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("switch", help="troca manual")

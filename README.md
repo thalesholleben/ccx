@@ -1,838 +1,131 @@
-# ccx
+# CCX
 
-Monitora a cota das contas Claude Code e troca de conta antes de bater o limite.
+![CCX capacity bars](assets/ccx-icon.png)
 
-O núcleo é Python stdlib puro, sem instalar dependências. O hot-swap opcional do
-Codex compila um launcher local com o .NET Framework do Windows. O projeto nasceu
-para resolver um incômodo concreto:
-com duas assinaturas Pro, você fica monitorando na mão qual delas ainda tem cota,
-fazendo `/logout` e `/login` no meio do trabalho, e ainda desperdiça cota semanal
-que ia expirar sem ser usada.
+**A local fleet for Claude Code and Codex agents, with isolated accounts and weighted capacity.**
 
-**Não existe ping de aquecimento aqui, de propósito.** A leitura de cota não manda
-prompt nenhum. Ver [Termos de uso](#termos-de-uso).
+[![Tests](https://github.com/thalesholleben/ccx/actions/workflows/tests.yml/badge.svg)](https://github.com/thalesholleben/ccx/actions/workflows/tests.yml)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/github/license/thalesholleben/ccx)](LICENSE)
 
-Também tem um módulo para contas do Codex CLI (ChatGPT), ver
-[Módulo Codex (ccx_codex)](#módulo-codex-ccx_codex).
+[Quickstart](#quickstart) · [Fleet guide](docs/features/fleet.md) · [Agent skill](skills/README.md) · [Migration](docs/runbooks/migration.md) · [Português](README.pt-BR.md)
 
-> [!IMPORTANT]
-> A troca padrão escreve a credencial **global** do cliente. No Codex, o bridge
-> opt-in também atualiza um app-server persistente já aberto, depois que o turno
-> corrente termina. Isso não é um balanceador por agente: dois app-servers no
-> mesmo `CODEX_HOME` tornam a troca ambígua e são recusados. Para contas
-> simultâneas, o padrão seguro continua sendo iniciar cada processo com um perfil isolado:
-> [`CLAUDE_CONFIG_DIR`](https://code.claude.com/docs/en/env-vars) no Claude e
-> [`CODEX_HOME`](https://developers.openai.com/codex/auth#credential-storage)
-> no Codex. O launcher opt-in `ccx_profile.py` inicia esses perfis sem tocar na
-> credencial global de uma sessão já aberta.
+![Compact fleet dashboard showing synthetic Pro, Max 5 and Max 20 accounts](docs/assets/fleet-dashboard.png)
 
----
+*Real application screenshot with synthetic accounts. The desktop interface is currently in Portuguese.*
 
-## Sumário
+## Why CCX
 
-- [Pré-requisitos](#pré-requisitos)
-- [Setup](#setup)
-- [Comandos](#comandos)
-- [Estratégias de troca](#estratégias-de-troca)
-- [Perfis isolados](#perfis-isolados)
-- [Hot-swap do Codex no VS Code](#hot-swap-do-codex-no-vs-code)
-- [Intervalo de checagem](#intervalo-de-checagem)
-- [Monitor contínuo no Windows](#monitor-contínuo-no-windows)
-- [No VS Code](#no-vs-code)
-- [Como funciona por dentro](#como-funciona-por-dentro)
-- [Problemas conhecidos e como diagnosticar](#problemas-conhecidos-e-como-diagnosticar)
-- [Limitações](#limitações)
-- [Termos de uso](#termos-de-uso)
-- [Teste](#teste)
-- [Módulo Codex (ccx_codex)](#módulo-codex-ccx_codex)
+A Pro account and a Max 20 account at 50% usage do not represent the same remaining
+capacity. CCX selects an account before starting each job, accounts for estimated
+cost and reserves capacity across session, weekly and model-specific limits.
 
----
+- **One account, multiple isolated workers.** Every worker has its own authenticated
+  profile. Accounts sharing an identity cannot be registered as independent pools.
+- **Compact capacity dashboard.** Register a name, provider and plan; inspect limits,
+  account health and jobs. Tasks arrive through the CLI and integrations.
+- **Independent execution.** Closing the dashboard keeps the service and agents
+  running. The Windows tray icon opens or hides the panel.
+- **No fixed agent cap.** Admission depends on quotas, free authenticated workers
+  and workspace conflicts. One profile runs one agent at a time.
+- **Persistent queue and reservations.** SQLite transactions coordinate dispatch.
+  Unknown usage blocks admission; ambiguous failures never replay a prompt blindly.
+- **An agent skill.** Commands, account selection, margins and operating strategies
+  for Claude Code and Codex, with separate optional operator configuration.
 
-## Pré-requisitos
+## Quickstart
 
-Duas ou mais contas Claude Code, e cada uma precisa ter sido logada pelo menos uma
-vez nesta máquina para o `add` capturar a credencial.
+The validated desktop environment is **Windows with Python 3.12+ and Tkinter**.
+Install the official Claude Code and/or Codex CLI and make the native executable
+available on `PATH`. Runtime uses Python's standard library; no `pip install` is
+required. POSIX process support exists, but is not part of the validated desktop
+matrix. Provider subscriptions and logins are supplied by the operator.
 
-**A pré-condição que realmente importa:** as contas precisam estar em organizações
-diferentes. Contas com o mesmo `organizationUuid` compartilham um pool de cota só,
-então trocar entre elas não resolve nada. O `add` avisa quando detecta isso. Para
-conferir na mão, `oauthAccount.organizationUuid` em `~/.claude.json`.
-
-Plataforma: Windows e Linux funcionam. No macOS o Claude Code guarda a credencial no
-Keychain e o `add` não encontra (ver [Limitações](#limitações)).
-
-## Setup
-
-```bash
-# logue com a primeira conta no Claude Code, depois:
-python ccx.py add
-
-# /logout, /login com a segunda conta, depois:
-python ccx.py add
-
-# confira
-python ccx.py status
+```sh
+git clone https://github.com/thalesholleben/ccx.git
+cd ccx
+python ccx-fleet.py panel
 ```
 
-O `add` é idempotente: rodar de novo com a mesma conta ativa atualiza o slot
-existente em vez de criar um duplicado, e limpa a marca de token morto se houver.
+On Windows, double-click `ccx-panel.cmd`. Register an account, then select **Login**
+and complete the official provider flow. Each account starts with one worker.
+For a terminal-only setup:
 
-## Comandos
-
-| Comando | O que faz |
-| --- | --- |
-| `ccx add [slot]` | Captura a conta logada agora. Sem argumento, usa o próximo número livre |
-| `ccx status` | As contas lado a lado: 5h, 7d, resets e recomendação; reutiliza a leitura recente |
-| `ccx stats` | Status consolidado de todas as contas Claude Code e Codex CLI |
-| `ccx switch [slot]` | Troca manual. Sem argumento, rotaciona para a próxima |
-| `ccx auto` | O monitor: acompanha a cota e troca sozinho |
-| `ccx hook` | Checagem silenciosa para o evento `Stop` do Claude Code |
-
-Flags globais, válidas em qualquer subcomando:
-
-| Flag | Padrão | Efeito |
-| --- | --- | --- |
-| `--strategy consume-first\|best` | `consume-first` | Ver [Estratégias](#estratégias-de-troca) |
-| `--threshold N` | `80` | Percentual em que a conta deixa de ser candidata |
-
-Flags do `auto`:
-
-| Flag | Padrão | Efeito |
-| --- | --- | --- |
-| `--cooldown N` | `60` | Segundos mínimos entre duas trocas, evita pingue-pongue. Não se aplica quando a conta ativa já está em 100%, ver [Estratégias](#estratégias-de-troca) |
-| `--poll N` | `0` | Força intervalo fixo em segundos. `0` usa o dinâmico |
-| `--once` | | Uma checagem só e sai, para uso em agendador |
-| `--pin N\|off` | | Fixa o slot `N` e suspende a rotação; `off` a libera novamente |
-
-Códigos de saída do `--once`: `0` trocou, `1` erro de configuração, `2` nada a
-fazer, `3` todas as contas travadas.
-
-**Uma instância por máquina.** Se já existe um `auto` rodando, o segundo avisa e sai
-com código 0. Sem isso, abrir a pasta em três janelas do VS Code subiria três loops
-triplicando o tráfego e disputando a mesma troca.
-
-`status`, `hook` e `auto` também compartilham um cache em disco. Rodar `status`
-várias vezes seguidas não gera uma nova consulta por conta a cada execução.
-Somente a conta ativa é consultada periodicamente. Contas inativas reutilizam o
-último percentual conhecido, pois não consomem cota enquanto estão paradas; se
-um `resets_at` vencer nesse intervalo, o CCX projeta aquela janela para 0% sem
-chamar a API. Quando uma conta volta a ser ativa, ela é consultada novamente.
-
-Para fixar uma conta, use `python ccx.py auto --pin 3`. A escolha é persistida,
-troca para o slot caso necessário e continua valendo após o watchdog reiniciar o
-monitor. Enquanto fixado, o monitor não consulta cota nem troca de conta. Para
-voltar à rotação, rode `python ccx.py auto --pin off`.
-
-A fixação vale para todo mundo que passa por `check_once`, então o hook `Stop`
-também para de trocar. O `switch` manual continua trocando na hora, mas é uma
-exceção temporária: na próxima checagem (no máximo ~60s) o monitor volta para o
-slot fixado. Para sair de vez do slot, use `--pin off` ou `--pin` no outro slot.
-O `status` e o `stats` avisam qual slot está fixado em vez de recomendar troca.
-
-## Perfis isolados
-
-Para agentes ou sessões paralelas, use o launcher opt-in `ccx_profile.py`. Ele
-não lê nem altera os slots globais do CCX, `~/.claude`, `~/.codex` ou um cliente
-já aberto: inicia um novo processo com seu próprio diretório de configuração.
-
-```powershell
-# faça login uma vez em cada perfil, escolhendo a conta naquele fluxo interativo
-python ccx_profile.py login claude 1
-python ccx_profile.py login codex 2
-
-# execute uma sessão nova no perfil correspondente
-python ccx_profile.py run claude 1 -- --model opus -p "revise este diff"
-python ccx_profile.py run codex 2 -- --model gpt-5.2-codex
+```sh
+python ccx-fleet.py cell add account-a claude --plan pro
+python ccx-fleet.py cell login account-a
+python ccx-fleet.py service start
+python ccx-fleet.py status
 ```
 
-Os perfis ficam em `~/.ccx/profiles/claude/N` e `~/.ccx/profiles/codex/N`.
-O `N` é apenas o rótulo do perfil; não equivale a um slot global do `ccx`. Para
-Codex, o launcher força o backend de credenciais em arquivo no processo filho,
-evitando compartilhar o keyring com outra sessão. Settings, plugins e histórico
-também ficam separados por perfil. Sem o bridge, não combine `ccx_codex auto`
-com agentes persistentes: a rotação global só alcança invocações novas.
+Submit an authorized task from a UTF-8 file:
 
-## Monitor contínuo no Windows
-
-Para a rotação continuar sem depender de uma janela do VS Code, instale uma vez o
-monitor do usuário atual:
-
-```powershell
-cd C:\caminho\para\ccx
-.\install-ccx-monitor.ps1
+```sh
+python ccx-fleet.py run claude --prompt-file task.md --cwd /path/to/project --request-id review-001 --timeout 900
 ```
 
-Ele cria a tarefa `\CCX\Claude Monitor`, inicia-a agora e a inicia em cada logon. A
-tarefa executa um watchdog a cada minuto: ele só lê o lock local do monitor
-(não consulta usage) e relança o `ccx auto` em processo destacado se ele morrer. Ela
-continua funcionando na bateria. O lock interno registra o PID e a marca de criação
-do dono: PID reciclado é tratado como processo morto sem esperar o timeout, enquanto
-um processo apenas suspenso não ganha um segundo monitor na retomada. Os eventos de início, erro inesperado,
-encerramento manual, relançamento e troca ficam em
-`~/.ccx/auto.log` (rotacionado em 512 KB). O arquivo nunca registra tokens.
+Target a particular account with `--cell account-a`. Omit it for automatic
+selection. To authorize file changes, add `--permission write`. The default is
+read-only; Claude's read-only mode does not enable shell commands. Specify
+`--model` and `--effort` when required. See the [command reference](skills/ccx/references/commands.md).
 
-Cada troca vai para o log **com o snapshot que a justificou**, no formato
-`troca para o slot 4 (ativa esgotada; 1:100.0%/26.0%/100.0%  2:86.0%/67.0%/- ...)`.
-As três posições são 5h, 7d e semanal do modelo. O motivo é `limiar`,
-`ativa esgotada`, `proximo reset`, `manual` ou `fixacao`. Sem isso o log só diz o destino, e
-um post-mortem não consegue distinguir "escolheu uma conta com folga" de "escolheu a
-menos pior": foi exatamente o que faltou para fechar o diagnóstico de 19/08/2026. O que
-entra ali é percentual e número de slot, nunca token, e-mail ou payload.
-O watchdog usa `pythonw.exe`, portanto não abre uma janela de terminal a cada minuto.
-Antes de registrar a tarefa, o instalador rejeita o alias da Microsoft Store e
-confirma um executável Python 3.10+ real. Se o monitor terminar no primeiro
-segundo, o watchdog registra apenas o código de saída no log seguro; ele nunca
-captura a saída do processo, que poderia conter credenciais.
-Se o próprio `ccx auto` falhar antes do loop, o log registra somente a classe da
-falha ou o caso de menos de duas contas, nunca a mensagem da exceção.
-Se a tarefa for desativada manualmente no Agendador, ela continua desativada após
-reiniciar o Windows. O `status` avisa que o monitor está offline; rode o instalador
-de novo para habilitá-la.
+## Capacity and execution
 
-O `ccx auto` do VS Code fica como fallback manual: não inicia mais ao abrir a pasta,
-evitando que uma instância efêmera ocupe o lock antes do monitor permanente. Para
-remover a tarefa:
+| Profile | Session weight | Default weekly weight | Default margin |
+| --- | ---: | ---: | ---: |
+| Pro | 1 | 1 | 10% |
+| Max 5 | 5 | 1 | 10% |
+| Max 20 | 20 | 1 | 10% |
 
-```powershell
-.\install-ccx-monitor.ps1 -Uninstall
+These are scheduling profiles, not guaranteed token allowances. Max profiles
+apply to Claude; Codex supports Pro or custom capacity. Weekly weight remains
+conservative until calibrated with account evidence. The default task estimate is
+15 equivalent x1 points. Weekly/model limits can block an account with session
+capacity remaining. Usage collected by CCX can age out when the fleet is idle.
+
+A cell identifies an account/quota pool. Workers hold independent OAuth homes.
+The scheduler reserves capacity and assigns a free worker; a separate runner
+launches the official CLI. Two jobs cannot share the same profile. Concurrent
+writes require separate worktrees or non-overlapping directories.
+
+A waiting-client timeout does **not** cancel the job. Keep its ID and use `wait`
+or `cancel`. Closing the panel does not stop execution. Stopping the service
+stops new dispatches; existing runners finish. Restarting Windows is different:
+there is no automatic logon installation or live-job migration between accounts.
+
+## Agent installation
+
+```sh
+python scripts/install-skill.py both
 ```
 
-O desinstalador desabilita e remove a tarefa e encerra somente um processo cuja
-imagem e linha de comando confirmem que é este monitor do CCX. Ele nunca encerra
-um PID não verificado e deixa a recuperação do lock para o próprio monitor.
+Install into Claude Code and Codex's skill directories, then refresh your agent
+session. The skill triggers before calling another agent and teaches explicit
+account targeting without changing global credentials. Details: [skills](skills/README.md).
+Native IDE subagents and custom review runners need an explicit integration;
+installing a skill alone does not route their processes through CCX.
 
-## Estratégias de troca
+## Migration and compatibility
 
-Primeiro, dois conceitos que não são a mesma coisa:
+Fleet mode is the primary interface. Old global rotation commands, hooks and
+Codex bridge are compatibility tools, not the fleet scheduler. Stop fleet admission before updating an existing installation. Follow the
+[migration runbook](docs/runbooks/migration.md) to stop old automation without
+interrupting live sessions. Legacy modules remain because the fleet reuses their
+parsers and file/lock primitives; deleting them would break the new runtime.
 
-- **Utilizável:** a janela que aperta está abaixo de 100%. A conta consegue atender.
-- **Candidata:** a janela que aperta está abaixo do `--threshold`. Vale trocar para ela.
+Never copy global tokens into worker profiles. Complete a separate official login
+for every worker and validate coexistence before increasing parallelism.
 
-"Janela que aperta" é a maior entre 5h, 7d e o limite semanal por modelo, porque
-é a que bloqueia primeiro. Uma conta com 5h em 0% e semanal em 97% está tão
-apertada quanto o contrário.
+## Development
 
-**`consume-first`** (padrão): entre as candidatas, escolhe a de reset semanal mais
-próximo. Cota semanal é perecível, então a lógica é gastar primeiro a que vai virar
-pó. Troca mais, aproveita mais.
-
-**`best`**: entre as candidatas, escolhe a de maior folga. Troca menos, mas
-desperdiça cota semanal que ia expirar.
-
-**Quando nenhuma conta é candidata**, cai para a utilizável de menor utilização. O
-`consume-first` considera utilizações com diferença menor que 5 pontos como empate e
-prefere, entre elas, o reset semanal mais próximo. O limiar existe para trocar antes
-de bater, não para te deixar parado numa conta travada tendo outra que ainda atende.
-Se todas estiverem em 100%, o CCX estaciona na conta que ficará completamente
-utilizável primeiro, sem margem de empate. Quando a próxima conta liberar, ela volta
-à seleção normal e o semanal mais próximo pode provocar a troca seguinte. Quando mais
-de uma janela da mesma conta está em 100%, vale o reset mais tarde, pois todas precisam
-liberar.
-
-Conta com cota desconhecida (erro de rede, token morto) nunca é escolhida
-automaticamente, mas segue sendo alvo válido de um `switch` explícito.
-
-### O cooldown não vale para conta esgotada
-
-O cooldown existe contra pingue-pongue: duas contas de folga parecida ficariam
-trocando de lugar a cada checagem, e cada troca reescreve credencial. Nada disso se
-aplica quando a conta **ativa** já bateu 100%: ela não atende mais, e voltar para ela
-não é um risco que precise ser evitado. Nesse caso a troca sai na hora.
-
-**Isto é cicatriz, não zelo teórico.** Em 19/08/2026, com limiar 80 e cooldown 300,
-uma frota de agents paralelos levou a conta ativa de candidata a 100% em menos de 4
-minutos, cerca de 5 pontos por minuto. Os 20 pontos de folga que o limiar comprava
-valiam uns 240s, menos que os 300s de cooldown. A conta morria **dentro** da trava e o
-monitor ficava proibido de sair dela.
-
-Daí a regra para mexer nesses dois números, que são calibrados juntos:
-
-```
-(100 - threshold) / burn_rate  >>  cooldown + maior POLL_TIGHT
+```sh
+python scripts/check.py
 ```
 
-Com os valores de hoje: 20 pontos a 5 pts/min dão 240s, contra 60 + 60 = 120s. Baixar
-o limiar sem olhar o cooldown, ou aumentar o cooldown sem olhar o limiar, recria o
-travamento.
-
-O critério do escape é 100%, não o limiar. Escapar sempre que a ativa passa do limiar
-equivaleria a remover o cooldown, porque um alvo diferente da ativa já implica que a
-ativa está pior. O limiar serve para trocar **antes** de bater; o escape serve para não
-ficar preso **depois** de bater. Cota ilegível não escapa: erro de medição, inclusive
-429, não prova esgotamento.
-
-Um erro ao medir a **conta ativa**, inclusive `HTTP 429`, não prova que uma chamada
-ao modelo esgotou a cota. Sem leitura anterior confiável, o monitor mantém a conta
-atual. Se ela foi confirmada como esgotada nos últimos 5 minutos e a releitura deu
-429, essa última leitura ainda pode orientar a troca para uma conta conhecida — sem
-depender de um erro de medição isolado.
-
-## Intervalo de checagem
-
-Polling só serve para decidir uma troca, e decisão de troca exige **duas contas
-utilizáveis**. Todo o intervalo sai dessa observação:
-
-**Duas ou mais utilizáveis:** faixa com jitter, 180 a 240s normalmente, apertando
-para 45 a 60s quando a janela de **5h da conta ativa** passa de 50%.
-
-O ponto de aperto fica **abaixo** do limiar de troca de propósito. Apertar o poll
-depois de já ter cruzado o ponto de troca não serve para nada, a decisão já passou.
-O módulo Codex usa faixas próprias (`ccx_codex.BANDS`), porque lá a janela primária
-costuma ser a semanal, que não se move dentro de uma sessão.
-
-O gatilho é o 5h de propósito. É a única janela que se move rápido dentro de uma
-sessão. O semanal sobe devagar e leva dias para resetar, então usá-lo aqui
-prenderia o poll na faixa apertada por dias inteiros sem que nada estivesse por
-acontecer. Um poll de 4 minutos não perde nada de relevante no semanal.
-
-**Menos de duas utilizáveis:** não existe decisão a tomar até alguma resetar, e o
-`resets_at` da API diz exatamente quando. Dorme até lá em vez de checar, com teto de
-1h (seguro barato caso o horário venha errado ou mude) e piso de 60s (evita busy
-loop se o `resets_at` estiver no passado por dado velho). Na prática isso troca umas
-25 requisições por 1.
-
-Uma conta travada volta a atender quando **todas** as suas janelas em 100% resetarem,
-então quem manda é o reset mais tarde entre elas. Entre contas travadas, acorda
-quando a primeira volta.
-
-**Erro em qualquer conta:** cai para a faixa larga. Se o endpoint devolveu 429,
-insistir de 100 em 100s só piora.
-
-**Cache compartilhado:** uma leitura válida é reaproveitada por até 30s; um erro,
-por até 120s. O cache fica no mesmo store protegido por lock e é relido depois de
-adquirir o lock. Assim, se quatro agentes terminarem juntos, o primeiro consulta e
-os outros reutilizam o resultado em vez de fazer quatro varreduras completas, sem
-atrasar o próximo poll dinâmico.
-
-O jitter também evita um batimento perfeitamente periódico, que é padrão mais fácil
-de detectar do que poll irregular.
-
-### Checagem ao terminar cada resposta
-
-Polling sozinho tem uma janela inevitável: uma resposta longa pode fazer a cota
-saltar entre duas consultas. O comando `ccx hook` existe para o evento `Stop` do
-Claude Code e pede uma checagem assim que cada resposta termina. Se a leitura
-compartilhada ainda estiver recente, ele não consulta a rede novamente.
-
-O hook é silencioso, respeita o mesmo cooldown e usa o mesmo `store.lock` do
-monitor. Ele não manda prompt e não consome cota. O `auto` continua rodando como
-fallback para resets e mudanças fora de uma sessão.
-
-Configuração de usuário em `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python \"C:/caminho/para/ccx.py\" hook",
-            "timeout": 30
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-Hooks são carregados ao abrir a sessão. Depois de instalar ou alterar essa
-configuração, encerre e abra o Claude Code novamente.
-
-## No VS Code
-
-Este repositório não instala uma task automática do VS Code. No Windows, a opção
-sem supervisão para Claude é o
-[monitor do Agendador](#monitor-contínuo-no-windows), independente da janela do
-editor.
-
-Use `Tasks: Run Task` → `ccx auto (fallback manual)` somente quando o monitor
-permanente não estiver instalado ou durante diagnóstico. Não é preciso executar a
-task a cada troca, a cada `status` nem quando um agente termina.
-
-Sem instalar o bridge, não mantenha `ccx_codex auto` junto da extensão do Codex:
-o processo persistente continua com a identidade carregada mesmo depois de
-`auth.json` mudar. Com o bridge ativo, `switch` e `auto` esperam o turno corrente,
-trocam a identidade em memória e só depois confirmam o arquivo em disco.
-
-Fora do VS Code, `ccx-auto.cmd` faz o mesmo com um duplo clique, de qualquer
-diretório.
-
-## Hot-swap do Codex no VS Code
-
-No Windows, instale uma vez o bridge opt-in:
-
-```powershell
-cd C:\caminho\para\ccx
-.\install-ccx-codex-bridge.ps1
-```
-
-O instalador compila um launcher nativo em `~/.ccx/bin`, configura
-`chatgpt.cliExecutable` e impede que esse caminho local seja enviado pelo Settings
-Sync. A edição reconhece comentários JSONC e mantém o original em
-`settings.json.ccx-codex-bridge.bak` enquanto o bridge estiver instalado. Ele
-**não** mata nem reinicia o processo atual. Quando for seguro, execute
-`Developer: Reload Window` uma vez. Da sessão seguinte em diante:
-
-```powershell
-python ccx_codex.py switch 4
-# ... slot 4 ativo (app-server atualizado) ...
-```
-
-Uma requisição que já está em voo continua na conta em que começou. O bridge segura
-novos trabalhos, aguarda `turn/completed`, usa o login externo oficial do app-server
-e grava o arquivo somente depois da confirmação. Falha ou timeout aborta sem avançar
-`last_switch`. O fluxo completo, limites, segurança, validação e rollback estão em
-[`docs/features/codex-hot-swap.md`](docs/features/codex-hot-swap.md).
-
-Para remover:
-
-```powershell
-.\install-ccx-codex-bridge.ps1 -Uninstall
-```
-
-O uninstall restaura apenas as configurações que o instalador tomou para si, remove
-o backup depois da restauração bem-sucedida e também espera um reload manual. Se a
-chave tiver sido assumida por outro software, ele preserva tanto a configuração atual
-quanto o backup e sai com erro. Nenhum dos dois comandos encerra um agente.
-
-## Como funciona por dentro
-
-### De onde vem a cota
-
-`GET https://api.anthropic.com/api/oauth/usage`, com `Authorization: Bearer <token>`
-e o header `anthropic-beta: oauth-2025-04-20`. É a mesma fonte que o `/usage` do
-Claude Code consome.
-
-Leitura pura: não manda prompt, não consome cota e **não abre a janela de 5h**. A
-resposta traz `five_hour`, `seven_day` e limites semanais por modelo em `limits`,
-cada um com percentual e reset. O CCX usa o limite de modelo mais alto como
-restrição conservadora, para não escolher uma conta que já bloqueou um modelo.
-
-### O que a troca escreve
-
-Dois arquivos, e nos dois ela é cirúrgica:
-
-| Arquivo | O que muda |
-| --- | --- |
-| `~/.claude/.credentials.json` | Só o bloco `claudeAiOauth` e o `organizationUuid` |
-| `~/.claude.json` | Só o `oauthAccount` (a identidade que o Claude Code exibe) |
-
-**Por que cirúrgica e não copiando o arquivo:** o `.credentials.json` guarda também
-`mcpOAuth`, onde vivem os tokens OAuth dos servidores MCP. Uma troca que sobrescreve
-o arquivo inteiro derruba esses logins toda vez. Existe teste que falha se isso
-regredir (`test_swap_preserva_mcp`).
-
-Toda escrita é atômica: arquivo temporário e `os.replace`, para nunca deixar um
-JSON truncado se o processo morrer no meio.
-
-### O lock, que é a parte séria
-
-Toda escrita acontece segurando o lock do próprio Claude Code. O protocolo, lido do
-código dele:
-
-- O artefato é um **diretório** em `<alvo>.lock` (`~/.claude.lock`,
-  `~/.claude.json.lock`). A atomicidade do `mkdir` é o mutex.
-- Considera-se morto quando o mtime passa de 10s. Quem segura toca o mtime a cada
-  3s para provar que está vivo, e um lock morto pode ser tomado.
-- O Claude Code tenta 5 vezes com sleeps de 1 a 2s antes de desistir, então segurar
-  por meio segundo é totalmente cooperativo.
-
-**Sem isso a ferramenta falha em silêncio.** O fluxo de refresh do Claude Code é ler
-a credencial, ir na rede e salvar, tudo sob `~/.claude.lock`. Uma troca que caísse
-dentro dessa janela seria sobrescrita pelo token da conta velha, e você não veria
-erro nenhum, só continuaria na conta errada. Sob o lock, a releitura dele enxerga a
-credencial nova (não expirada) e ele aborta o próprio refresh.
-
-O mesmo mecanismo de lock é reusado para a trava de instância única do `auto`, em
-`~/.ccx/auto.lock`, com timeout 0 para falhar na hora em vez de esperar.
-Somente os locks internos do CCX (`auto` e `store`) recebem um arquivo de dono com
-PID e marca de criação; os locks do próprio Claude Code continuam vazios e seguem o
-protocolo original. Isso impede que um PID reciclado faça um monitor morto parecer
-vivo. Locks legados sem marca continuam compatíveis e só são considerados vivos com
-PID ainda existente.
-
-### Concorrência entre os próprios comandos
-
-Existe um segundo lock, `~/.ccx/store.lock`, separado do lock de instância única
-do `auto`. Ele serializa **toda** operação que renove token ou grave o store:
-`collect` (usada por `status` e pelo `auto`), `switch` e `add`.
-
-Isso não é zelo teórico, é cicatriz. A trava de instância única protegia só o
-loop do `auto`, mas `status` também renova token e grava. Rodar `ccx status` num
-terminal enquanto o `auto` rodava fazia os dois renovarem o mesmo refresh token
-ao mesmo tempo. A rotação no servidor invalida a cópia de quem perdeu a corrida,
-e a credencial guardada morre com `invalid_grant`, sem erro visível até você
-tentar voltar para aquela conta e descobrir que ela não existe mais.
-
-O mesmo ponto também protege o cache de usage. Depois de conseguir o lock, cada
-processo relê o store antes de decidir se consulta a rede. Isso importa porque um
-hook pode ter carregado o arquivo enquanto outro ainda estava consultando; sem a
-releitura, os dois fariam a mesma chamada mesmo estando serializados.
-
-O cache também evita uma rajada por número de contas. O monitor atualiza pela API
-somente o slot ativo e conserva o snapshot dos inativos. A troca não apaga esse
-snapshot: se a primeira leitura da nova ativa receber `429`, o seletor ainda sabe
-qual era sua cota no instante em que ela saiu do repouso.
-
-`do_switch` faz a mesma releitura antes da escrita final. Isso evita que uma decisão
-já calculada apague o refresh token ou o cache que outro hook gravou enquanto ela
-esperava o lock.
-
-Pelo mesmo motivo, `apply_slot` segura os **dois** locks do Claude Code durante a
-troca inteira, em vez de um por escrita. Entre gravar a credencial e gravar o
-perfil existe um instante em que o token é de uma conta e o `oauthAccount` é de
-outra. Quem lesse a identidade nessa janela concluiria a conta errada, e o
-`sync_active_slot` seguinte copiaria o token de uma conta para o slot da outra.
-
-Ordem de aquisição, sempre a mesma para não travar: `store.lock` primeiro, depois
-os locks do Claude Code.
-
-### Leitura de arquivo: corrompido não é vazio
-
-`read_json` devolve `{}` só quando o arquivo **não existe**. JSON inválido levanta
-`CorruptFile` e aborta a operação.
-
-Confundir os dois é destrutivo: o passo seguinte reescreve o arquivo e leva junto
-o que não foi lido. Num `.credentials.json` truncado por uma escrita interrompida,
-isso apagaria o `mcpOAuth` inteiro.
-
-Pela mesma lógica, uma resposta 200 do endpoint de usage sem nenhuma janela
-reconhecível levanta em vez de virar `{}`. Um dicionário vazio faria a conta
-aparecer com 0% de uso, ou seja, ser eleita como a mais folgada de todas
-justamente por não sabermos nada sobre ela.
-
-### Identidade da conta ativa, e por que não pelo token
-
-O slot ativo é identificado por **(e-mail, `organizationUuid`)** lidos do
-`oauthAccount` em `~/.claude.json`, nunca comparando tokens.
-
-O Claude Code rotaciona o refresh token da conta que está usando. Se a
-identidade dependesse do token, ela se perderia na primeira rotação, e aí
-**todo slot pareceria inativo, inclusive o vivo**. A consequência é a pior
-possível: o `ccx` passaria a renovar o token da conta ativa por baixo do Claude
-Code, os dois disputariam a rotação, e um invalidaria o refresh token do outro,
-matando a credencial guardada.
-
-Pelo mesmo motivo, a cada checagem a credencial viva é copiada de volta para o
-slot ativo (`sync_active_slot`). Sem isso a cópia guardada envelhece enquanto a
-conta é usada, e quando você tentasse voltar para ela o refresh responderia
-`invalid_grant`.
-
-### Certificados: o `ccx` prefere o bundle do certifi
-
-O armazenamento de certificados do Windows carrega raízes legadas expiradas, e a
-cadeia da Let's Encrypt falha por ali. Isso atinge `platform.claude.com`, onde
-fica o endpoint de refresh, mas **não** atinge `api.anthropic.com`, que usa outra
-CA. O sintoma é traiçoeiro: a leitura de cota funciona normalmente e só o refresh
-quebra, então a conta inativa vai apodrecendo sem erro visível até morrer.
-
-Por isso o contexto TLS usa `certifi.where()` quando o pacote está disponível, e
-cai no padrão do sistema quando não está. Para conferir:
-
-```bash
-python -c "import ssl,socket; ssl.create_default_context().wrap_socket(socket.create_connection(('platform.claude.com',443)),server_hostname='platform.claude.com')"
-```
-
-Se isso levantar `CERTIFICATE_VERIFY_FAILED`, o `certifi` deixa de ser opcional:
-`pip install -U certifi`.
-
-### Regras de refresh de token
-
-- **A conta ativa nunca é renovada.** O Claude Code é dono dela. Se os dois
-  renovarem, um invalida o token do outro.
-- **A inativa é renovada quando expira**, senão não há como ler a cota dela. O POST
-  vai para `https://platform.claude.com/v1/oauth/token` com
-  `grant_type=refresh_token` e o `client_id` público do Claude Code.
-- **Refresh token rejeitado** (`invalid_grant` em 400, 401 ou 403) é permanente: o
-  slot é marcado `MORTO`, sai da rotação e aparece assim no `status`. Insistir num
-  token morto só gera ruído. Para recuperar, logue com aquela conta e rode
-  `ccx add` de novo.
-- **Qualquer outro erro é transitório** e volta a ser tentado na próxima checagem.
-
-### Estado
-
-`~/.ccx/accounts.json`, com os slots, `last_switch` para o cooldown e, quando
-existir, `pinned_slot` para suspender a rotação. Por slot:
-e-mail, bloco `claudeAiOauth`, `oauthAccount` e `org_uuid`.
-
-**Contém tokens OAuth. Nunca versione nem copie para fora da máquina.**
-
-## Problemas conhecidos e como diagnosticar
-
-**Saber se o `auto` está vivo:**
-
-```bash
-python -c "import ccx_watchdog; print('vivo' if ccx_watchdog.monitor_alive() else 'morto')"
-```
-
-Para os locks internos do CCX, PID vivo com heartbeat velho pode ser apenas uma
-suspensão: o watchdog não duplica o monitor nesse caso. Um PID reciclado, PID morto
-ou lock legado sem dono com mtime velho é tomado automaticamente; não apague o lock
-na mão.
-
-**Saber por que o monitor permanente reiniciou:** abra `~/.ccx/auto.log` e confira
-o estado da tarefa `\CCX\Claude Monitor` no Agendador do Windows. O log registra
-só eventos operacionais, nunca tokens.
-
-**Conta aparece com `?` na cota.** O `status` mostra o motivo ao lado (`HTTP 429`,
-`timeout`, `token morto`). Um 429 no endpoint de usage é armazenado por 120s e
-derruba o poll para a faixa larga. Não repita `status` tentando fazê-lo sumir.
-
-**Trocou mas o cliente continua na conta antiga.** Reinicie aquela sessão. Não há
-garantia de recarga dinâmica para todo processo persistente. O Codex oficial, em
-particular, mantém um snapshot em memória e não observa alteração externa de
-`auth.json` até um reload explícito; também recusa cruzar a identidade da sessão
-para outra conta/workspace sem reconstruir seu estado
-([fonte](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
-
-**`codex logout` mata a conta no servidor, não só no disco.** O binário do Codex CLI
-(0.144.1, strings `failed to revoke auth tokens during logout` e
-`CODEX_REVOKE_TOKEN_URL_OVERRIDE ... https://auth.openai.com/oauth/revoke`) faz um
-`POST /oauth/revoke` antes de apagar o `auth.json`. Isso invalida o grant inteiro
-daquela conta na OpenAI, incluindo a cópia que o `ccx_codex` guardou no slot. Sintoma:
-depois de trocar de conta com `codex logout && codex login`, a conta anterior passa a
-dar `HTTP 401` com `"code": "token_revoked"` no usage e
-`"code": "refresh_token_invalidated"` ("Your session has ended") no refresh, mesmo com
-o `exp` do access token ainda longe. Para cadastrar uma conta nova **nunca use
-`codex logout`**: faça o login num `CODEX_HOME` separado, que é o que o
-`ccx_profile.py` já monta, e capture de lá.
-
-```powershell
-python ccx_profile.py login codex 2          # navegador; não encosta no auth.json principal
-$env:CODEX_HOME = "$HOME\.ccx\profiles\codex\2"
-python ccx_codex.py add 2                    # casa por e-mail, revive o slot e limpa o MORTO
-Remove-Item Env:CODEX_HOME
-Remove-Item -Recurse -Force "$HOME\.ccx\profiles\codex\2"
-```
-
-O `ccx_profile.py` é preferível a um `CODEX_HOME` qualquer por dois motivos: ele força
-`cli_auth_credentials_store="file"` (sem isso a credencial pode ir para o keyring e o
-`add` não acha `auth.json`) e o diretório fica fora de `%TEMP%`, onde o Codex recusa
-criar os aliases de PATH. Apagar o perfil no fim é deliberado: manter a mesma conta em
-dois lugares faz os dois rodarem o refresh e rotacionarem o token um do outro, que é o
-caminho para `refresh_token_reused`. Só conserve o perfil se aquela conta for viver
-isolada, e nesse caso não a cadastre também na rotação global.
-
-Desde 2026-08-14 o CCX detecta isso sozinho. Quando o usage devolve `401` **com
-`"code": "token_revoked"`** num slot inativo, ele gasta um refresh só para obter o
-veredito: se o refresh responder com código permanente, o slot vira `MORTO`, sai da
-rotação e passa a mostrar `token morto: relogue e rode 'ccx_codex add'`. Três guardas
-cercam esse caminho, e as três existem por um motivo concreto:
-
-- **`401` sem `token_revoked` não dispara nada.** O endpoint de usage devolve `401`
-  transitório: em 2026-08-14 as quatro contas deram `401` ao mesmo tempo e voltaram `200`
-  segundos depois. Tratar todo `401` como revogação faria o CCX rotacionar refresh token de
-  conta saudável, que é justamente o caminho para `refresh_token_reused`.
-- **A conta ativa nunca é renovada**, nem com `token_revoked`. Ela é do Codex CLI.
-- **No máximo um refresh por leitura.** Se o `exp` já tinha vencido e o refresh do topo da
-  função foi gasto, um `401` depois disso não gasta outro.
-
-Ao marcar um slot como morto, o CCX descarta junto a entrada dele no `usage_cache`. Sem
-isso, `remember_slot_usage` preservaria a última leitura boa por 300s e `pick_target`
-poderia eleger justamente a conta que acabou de morrer.
-
-## Limitações
-
-- **macOS não é suportado no `add`:** lá o Claude Code guarda a credencial no
-  Keychain, não em arquivo.
-- **Reset banking do Codex não é usado.** A API da OpenAI expõe
-  `rate_limit_reset_credits`, créditos redimíveis que resetam a janela atual
-  antes da hora. O `ccx_codex` não lê nem redime esse crédito: redimir seria
-  manipular o estado da conta, o mesmo motivo pelo qual não existe ping de
-  aquecimento no módulo Claude. Fica para uma versão futura, só como leitura.
-  Ver [Módulo Codex](#módulo-codex-ccx_codex).
-- **O limite por modelo é conservador.** O CCX não sabe qual modelo uma sessão
-  persistente vai pedir. Por isso considera o maior `weekly_scoped` de cada
-  conta para a rotação. Isso evita trocar para uma conta que já bloqueou um
-  modelo, mas pode deixar de usar a folga de outro modelo naquela mesma conta.
-- **A troca é global, não por agente.** Várias sessões abertas no mesmo perfil
-  podem manter credenciais em memória, disputar refresh ou continuar na identidade
-  anterior. Para paralelismo real, use `ccx_profile.py` para iniciar processos
-  separados desde o início; agentes internos de uma mesma sessão continuam
-  compartilhando a conta daquela sessão.
-
-## Termos de uso
-
-A ferramenta lê a API de usage com token OAuth de assinatura, o que a cláusula 3.7
-dos Consumer Terms da Anthropic trata como acesso automatizado fora de API key. Não
-há caso conhecido de enforcement contra isso, e é o que qualquer status line de cota
-faz.
-
-O que gera banimento é outra coisa: harness de terceiro, spoofing do harness e
-revenda de acesso. Nada disso acontece aqui, quem fala com o modelo continua sendo o
-Claude Code oficial, e a ferramenta só reposiciona qual credencial ele usa. Ter
-várias contas pagas não viola os termos, isso foi dito publicamente por engenheiro
-da Anthropic.
-
-Por isso também não existe ping periódico para abrir a janela de 5h mais cedo: seria
-script disparando prompt em assinatura, o caso que a cláusula descreve ao pé da
-letra. Se quiser alinhar a janela ao seu dia, manda a primeira mensagem você mesmo.
-
-## Teste
-
-```bash
-python test_ccx.py
-```
-
-Sem framework, só `assert`. 59 testes cobrindo:
-
-- escolha de conta nas duas estratégias, e o fallback quando nenhuma é candidata
-- cálculo de intervalo nos dois ramos (faixa com jitter e sono até o reset)
-- execução silenciosa da checagem usada pelo hook `Stop`
-- continuidade do monitor após erro inesperado
-- watchdog relançando somente monitor morto, sem duplicar processo suspenso
-- watchdog registrando saída precoce sem capturar stdout/stderr do processo
-- retomada com `timeout=0` removendo lock morto sem tomar lock vivo, inclusive PID
-  reciclado, e sem apagar owner de uma retomada concorrente
-- aviso explícito quando o monitor está offline e instalador sem janela piscando
-- cache/debounce compartilhado, inclusive releitura depois de esperar o lock
-- `HTTP 429` de usage mantendo a ativa sem histórico e trocando quando há
-  confirmação recente de esgotamento
-- troca relendo o store para não perder refresh token/cache concorrente
-- slot fixado curto-circuitando a checagem, sem nenhuma consulta de cota
-- `--pin` persistindo a escolha e `--pin off` devolvendo a rotação
-- saída do `status` sem intervalo enganoso quando há troca pendente
-- preservação do `mcpOAuth` na troca, e identidade não vazando entre slots
-- identidade sobrevivendo à rotação de token feita pelo Claude Code
-- JSON corrompido abortando em vez de virar arquivo vazio
-- respostas inesperadas da API (200 sem `access_token`, usage sem janelas)
-- `resets_at` sem fuso horário
-- validação de flags, liberação do lock e escrita atômica
-
-Vários desses nasceram de bugs que só apareceram rodando em produção, não de
-casos imaginados. Se um deles quebrar, foi regressão de algo que já falhou uma
-vez.
-
-O launcher de perfis tem sua própria checagem isolada:
-
-```bash
-python test_ccx_profile.py
-```
-
-Ela cobre validação do rótulo, ausência de path traversal, ambiente filho
-isolado e o backend de credenciais em arquivo do Codex.
-
-O bridge tem uma suíte própria, inclusive smoke contra o app-server real com
-tokens sintéticos (sem chamada de modelo ou consumo de cota):
-
-```bash
-python test_ccx_codex_bridge.py
-```
-
-## Módulo Codex (ccx_codex)
-
-Mesma ideia do `ccx.py`, para contas do Codex CLI (ChatGPT). É um arquivo
-separado (`ccx_codex.py`) que **importa `ccx.py`** e reusa de lá a engine de
-decisão (`pick_target`, `band_delay`, `next_wake`), a formatação de `status` e
-os primitivos de IO (leitura/escrita atômica, lock de diretório). O que muda é
-só o que é genuinamente diferente entre Claude Code e Codex CLI: formato do
-arquivo de credencial e protocolo da API de usage.
-
-```bash
-# logue com a primeira conta no Codex CLI, depois:
-python ccx_codex.py add
-
-# cadastre a segunda sem revogar a primeira (veja "token_revoked" acima):
-python ccx_profile.py login codex 2
-$env:CODEX_HOME = "$HOME\.ccx\profiles\codex\2"
-python ccx_codex.py add 2
-Remove-Item Env:CODEX_HOME
-
-# confira
-python ccx_codex.py status
-
-# veja Claude Code e Codex na mesma saída
-python ccx.py stats
-
-# sem o bridge, só afeta invocações novas; com ele, troca o app-server ocioso
-python ccx_codex.py auto
-```
-
-Os comandos, flags e a leitura do `status`/`auto` são idênticos aos do
-`ccx.py` (ver [Comandos](#comandos) e [Estratégias de troca](#estratégias-de-troca));
-só troque `ccx.py` por `ccx_codex.py`. `ccx-codex-auto.cmd` faz o mesmo que
-`ccx-auto.cmd`, para o Codex.
-
-Os parâmetros continuam aceitando as mesmas flags, mas os defaults do Codex são
-`--threshold 60` e `--cooldown 120`; o monitor do Claude usa `80` e `60` para
-trocar antes, sem mudar a calibração do outro provedor.
-
-`--pin` também funciona igual (`python ccx_codex.py auto --pin 1`), e aqui ele
-resolve mais do que no módulo Claude: como o Codex não tem monitor permanente,
-o `auto --pin N` grava a fixação, reposiciona o `auth.json` no slot `N` e, sem
-nada rodando depois, a conta simplesmente fica onde foi deixada. Se você mantiver
-um `auto` do Codex aberto, ele passa a só confirmar a fixação, sem consultar cota.
-Sem o bridge, um app-server aberto continua com a identidade antiga. Com o bridge,
-a fixação usa a mesma transação de hot-swap descrita acima.
-
-### O que é diferente do módulo Claude
-
-- **Um arquivo só.** O Codex CLI guarda tudo em `~/.codex/auth.json`
-  (`CODEX_HOME` para outro caminho), sem o equivalente ao `.claude.json`
-  separado. A troca continua cirúrgica: só reescreve `tokens` e
-  `last_refresh`, preservando `auth_mode`/`OPENAI_API_KEY` como estavam.
-- **Token é JWT.** `access_token` e `id_token` são JWTs de verdade. A
-  expiração vem do claim `exp` do `access_token` (decodificado localmente só
-  para leitura, sem checar assinatura), e a identidade (e-mail, `account_id`,
-  `workspace_id`) vem dos claims do `id_token`. Não existe um campo
-  `expiresAt` gravado à parte como no `.credentials.json` do Claude Code.
-- **Refresh:** `POST https://auth.openai.com/oauth/token` com
-  `grant_type=refresh_token` e o `client_id` público do Codex CLI
-  (`app_EMoamEEZ73f0CkXaXp7hrann`). Erros permanentes (`invalid_grant`,
-  `refresh_token_expired`, `token_invalidated` etc., o conjunto documentado
-  pela própria API) marcam o slot como `MORTO`, igual ao módulo Claude.
-- **Usage:** `GET https://chatgpt.com/backend-api/wham/usage`, com
-  `chatgpt-account-id` no header. A resposta traz `primary_window` (janela
-  curta, ~5h) e `secondary_window` (semanal), mapeados para os mesmos rótulos
-  `5h`/`7d` que o resto do código já entende, então a engine de decisão do
-  `ccx.py` funciona sem nenhuma alteração.
-- **Processos persistentes mantêm a identidade em memória sem o bridge.** O `AuthManager`
-  oficial carrega `auth.json` uma vez, só observa mudanças externas após reload
-  explícito e protege a identidade original da sessão. Portanto,
-  `ccx_codex switch/auto` altera apenas invocações **novas** no modo padrão. O
-  bridge opt-in usa `account/login/start` com `chatgptAuthTokens` para atualizar
-  um app-server vivo depois do turno atual. Uma sessão antiga sem o bridge ainda pode
-  tentar renovar o token anterior e terminar em 401
-  ([código oficial](https://github.com/openai/codex/blob/4642370542739d5dd080b0c87a9de06a6435d3db/codex-rs/login/src/auth/manager.rs#L1769-L1780)).
-  Para contas paralelas, use `ccx_profile.py` para iniciar um `CODEX_HOME` isolado
-  por processo; o bridge recusa vários app-servers compartilhando o mesmo home.
-- **Workspace em vez de organização.** O aviso de cota compartilhada usa
-  `workspace_id` (seats de Team/Enterprise) em vez do `organizationUuid` do
-  Claude Code.
-- **Reset banking não implementado.** Ver [Limitações](#limitações).
-
-### Origem
-
-Este módulo nasceu de ler o código-fonte do
-[codex-lb](https://github.com/Soju06/codex-lb) (load balancer de contas
-ChatGPT, proxy completo com dashboard) para extrair o protocolo real:
-endpoint de usage, endpoint e client_id de refresh, e o formato do
-`auth.json`. O módulo principal continua sem dependência externa. O bridge local
-é opt-in e estreito: proxy stdio transparente mais um controle autenticado em
-loopback, sem dashboard nem proxy de chamadas ao modelo.
-
-### Teste
-
-```bash
-python test_ccx_codex.py
-```
-
-Mesmo estilo do `test_ccx.py`, com 39 testes cobrindo o que é específico do Codex: leitura
-de claims do JWT, expiração via `exp`, classificação de erro de refresh
-(permanente vs. transitório), mapeamento de `primary_window`/`secondary_window`
-para o formato `5h`/`7d`, preservação de `auth_mode`/`OPENAI_API_KEY` na
-troca, identidade sobrevivendo à rotação de refresh token, cache compartilhado,
-429 de usage com decisão baseada em histórico recente, slot fixado curto-circuitando
-a checagem sem consultar cota, troca sem sobrescrever estado concorrente e continuidade
-do auto após erro inesperado sem vazar detalhe da exceção.
-
-`test_ccx_codex_bridge.py` soma 18 testes de framing, autenticação local, barreira
-de turnos, commit/rollback, refresh, múltiplos app-servers, launcher nativo,
-instalação JSONC reversível e hot-login real sem reinício.
-
-## Licença
-
-[MIT](LICENSE).
+This runs the offline regression suites and skill-installer test using synthetic
+credentials and temporary state. On an interactive Windows desktop, also run
+`python tests/tray-smoke.py` and `python tests/panel-smoke.py`. Pillow is optional
+for screenshot capture and rebuilding icons, not for runtime.
+
+Read [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md). Source is licensed under [MIT](LICENSE).

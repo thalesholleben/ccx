@@ -1,0 +1,23 @@
+name: Bug report
+description: Report an observable CCX problem
+title: "[Bug] "
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+      description: Use synthetic account names. Never include tokens, prompts or state dumps.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps and sanitized command output
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS, Python version and CCX commit
+    validations:
+      required: true

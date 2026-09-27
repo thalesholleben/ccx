@@ -19,7 +19,9 @@ Referencias de formato (lidas do proprio Claude Code):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import random
 import ssl
@@ -83,6 +85,16 @@ class PollBands(NamedTuple):
     wide: tuple[float, float]
     tight: tuple[float, float]
     tighten_at: float
+
+
+class SwitchGuard(NamedTuple):
+    """Identidade e geração da decisão, sem conter credenciais."""
+
+    generation: int
+    last_switch: float
+    active: str | None
+    target_identity: tuple[str, str]
+    usage_fingerprint: str
 
 
 DEFAULT_BANDS = PollBands(POLL_WIDE, POLL_TIGHT, POLL_TIGHTEN_AT)
@@ -521,6 +533,38 @@ def token_expired(oauth: dict) -> bool:
     return now_ms + REFRESH_SKEW_MS >= int(exp)
 
 
+def slot_auth_state(slot: dict) -> str:
+    """Validação local, não prova de aceitação pelo provedor nem dono de refresh."""
+    if slot.get("dead"):
+        return "revoked"
+    oauth = slot.get("oauth")
+    if (not isinstance(oauth, dict) or not isinstance(oauth.get("accessToken"), str)
+            or not oauth["accessToken"].strip()):
+        return "invalid"
+    exp = oauth.get("expiresAt")
+    if exp is not None and (type(exp) not in (int, float) or not math.isfinite(exp) or exp <= 0):
+        return "invalid"
+    if token_expired(oauth):
+        refresh = oauth.get("refreshToken")
+        return "refresh_required" if isinstance(refresh, str) and refresh.strip() else "expired"
+    return "unverified"
+
+
+def switchable_usage(store: dict, usage_map: dict) -> dict:
+    """Compatibilidade legada: o CLI ainda pode renovar o destino depois da troca.
+
+    refresh_required não prova refresh válido, acesso aceito ou job recuperado.
+    Não reutilizar essa regra como admissão do futuro supervisor.
+    """
+    return {key: usage for key, usage in usage_map.items()
+            if slot_auth_state(store["slots"].get(key, {})) in {"unverified", "refresh_required"}}
+
+
+def auth_exclusions(store: dict) -> list[str]:
+    return [f"slot {key} {state}" for key, slot in store["slots"].items()
+            if (state := slot_auth_state(slot)) not in {"unverified", "refresh_required"}]
+
+
 def refresh_token(oauth: dict) -> tuple[dict | None, str]:
     """Renova o access token. Devolve (bloco_novo, erro).
 
@@ -583,6 +627,34 @@ def pinned_slot(store: dict) -> str | None:
     if not isinstance(key, str) or key not in store["slots"]:
         raise ValueError(f"Slot fixado inválido: {key!r}.")
     return key
+
+
+def control_generation(store: dict) -> int:
+    value = store.get("control_generation", 0)
+    if type(value) is not int or value < 0:
+        raise CorruptFile("Geracao de controle invalida; nenhuma escrita permitida.")
+    return value
+
+
+def advance_control(store: dict) -> None:
+    """Somente com store_lock: pin, cadastro e troca invalidam decisões antigas."""
+    store["control_generation"] = control_generation(store) + 1
+
+
+def switch_guard(store: dict, active: str | None, target: str) -> SwitchGuard:
+    slot = store["slots"].get(target, {})
+    cache = store.get("usage_cache", {})
+    fingerprint = hashlib.sha256(json.dumps(
+        {key: cache.get(key) for key in (active, target) if key is not None},
+        # Hash privado, não JSON de integração. Tolerar NaN legado mantendo sua
+        # representação estável, sem perder a comparação de revisões do cache.
+        sort_keys=True, allow_nan=True,
+    ).encode()).hexdigest()
+    return SwitchGuard(
+        control_generation(store), store.get("last_switch", 0), active,
+        ((slot.get("email") or "").lower(), slot.get("org_uuid") or ""),
+        fingerprint,
+    )
 
 
 def cached_slot_usage(
@@ -1100,6 +1172,7 @@ def _add(args: argparse.Namespace) -> int:
         slot.update(oauth=oauth, account=account, org_uuid=org, email=email)
         slot.pop("dead", None)
         store.get("usage_cache", {}).pop(existing, None)
+        advance_control(store)
         write_json(STORE, store)
         print(f"slot {existing} atualizado: {email}")
         return 0
@@ -1119,6 +1192,7 @@ def _add(args: argparse.Namespace) -> int:
         "account": account,
         "org_uuid": org,
     }
+    advance_control(store)
     write_json(STORE, store)
     print(f"slot {key} adicionado: {email}  (org {org[:8] or '?'})")
     # So acusa org compartilhada quando TODAS as contas tem org conhecida e igual:
@@ -1133,31 +1207,57 @@ def _add(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    if getattr(args, "as_json", False):
+        import ccx_runtime
+
+        try:
+            payload = json.dumps(ccx_runtime.status_snapshot(), ensure_ascii=False, allow_nan=False)
+        except (Exception, SystemExit) as exc:
+            code = ("store_corrupt" if isinstance(exc, ccx_runtime.ccx.CorruptFile) else
+                    "store_busy" if isinstance(exc, TimeoutError) else
+                    "invalid_state" if isinstance(exc, (ValueError, TypeError)) else
+                    "snapshot_unavailable")
+            print(json.dumps({"schema_version": 1, "provider": "claude", "error_code": code}), file=sys.stderr)
+            return 4
+        print(payload)
+        return 0
     store = load_store()
     if not store["slots"]:
         print("Nenhuma conta. Logue no Claude Code e rode 'ccx add'.")
         return 1
     usage_map, err_map, active = collect(store)
-    print(
-        f"{'':2} {'conta':28} {'uso 5h':>7} {'reset 5h':>9} "
-        f"{'uso 7d':>7} {'reset 7d':>9} {'uso mod':>7} {'reset mod':>9}"
-    )
-    for key, slot in store["slots"].items():
-        usage = usage_map[key]
-        mark = "*" if key == active else " "
-        tag = f"  {err_map[key]}" if err_map[key] else ""
+    from fleet import terminal
+    if terminal.visual(args):
+        terminal.legacy(store, usage_map, err_map, active, "claude", args)
+    else:
         print(
-            f"{mark}{key} {slot['email'][:28]:28} "
-            f"{fmt_window(usage, '5h'):>7} {fmt_reset(usage, '5h'):>9} "
-            f"{fmt_window(usage, '7d'):>7} {fmt_reset(usage, '7d'):>9} "
-            f"{fmt_window(usage, 'modelo'):>7} {fmt_reset(usage, 'modelo'):>9}{tag}"
+            f"{'':2} {'conta':28} {'uso 5h':>7} {'reset 5h':>9} "
+            f"{'uso 7d':>7} {'reset 7d':>9} {'uso mod':>7} {'reset mod':>9}"
         )
+        for key, slot in store["slots"].items():
+            usage = usage_map[key]
+            mark = "*" if key == active else " "
+            tag = f"  {err_map[key]}" if err_map[key] else ""
+            auth = slot_auth_state(slot)
+            if auth == "refresh_required":
+                tag += "  refresh_required (renovacao pelo CLI pendente)"
+            elif auth != "unverified":
+                tag += f"  waiting_auth: slot {key} excluido ({auth})"
+            print(
+                f"{mark}{key} {slot['email'][:28]:28} "
+                f"{fmt_window(usage, '5h'):>7} {fmt_reset(usage, '5h'):>9} "
+                f"{fmt_window(usage, '7d'):>7} {fmt_reset(usage, '7d'):>9} "
+                f"{fmt_window(usage, 'modelo'):>7} {fmt_reset(usage, 'modelo'):>9}{tag}"
+            )
     pinned = pinned_slot(store)
     if pinned:
         print(f"\n-> slot {pinned} fixado; use 'ccx auto --pin off' para liberar a rotação")
         return 0
-    target = pick_target(usage_map, args.threshold, args.strategy)
-    all_blocked = all_known_usage_blocked(usage_map)
+    target = pick_target(switchable_usage(store, usage_map), args.threshold, args.strategy)
+    all_blocked = all_known_usage_blocked(switchable_usage(store, usage_map))
+    excluded = auth_exclusions(store)
+    if excluded:
+        print("-> waiting_auth: " + "; ".join(excluded))
     hold_active = hold_active_on_unknown_usage(store, usage_map, active)
     if target and target != active:
         if all_blocked:
@@ -1202,19 +1302,41 @@ def do_switch(
     *,
     only_if_pinned: bool = False,
     reason: str = "",
+    expected: SwitchGuard | None = None,
 ) -> bool:
     with store_lock():
         # A coleta soltou este lock antes de chegar aqui. Releia o store para
         # nao sobrescrever cache ou refresh token que outro hook gravou nesse
         # intervalo.
         fresh = load_store()
-        if only_if_pinned and pinned_slot(fresh) != key:
+        # A trava vale também para uma decisão comum calculada antes do pin.
+        pin = pinned_slot(fresh)
+        if (pin is not None and pin != key) or (only_if_pinned and pin != key):
+            auto_event("troca descartada: fixacao mudou")
             return False
+        control_generation(fresh)  # validar antes de tocar nas credenciais
         slot = fresh["slots"].get(key)
         if slot is None:
             raise ValueError(f"Slot {key} nao existe mais.")
+        active = active_slot(fresh)
+        if expected is not None and switch_guard(fresh, active, key) != expected:
+            auto_event("troca descartada: decisao superada")
+            return False
+        # Preserve a credencial renovada pelo CLI antes de sair da conta.
+        sync_active_slot(fresh, active)
+        slot = fresh["slots"][key]
+        auth = slot_auth_state(slot)
+        if auth not in {"unverified", "refresh_required"}:
+            # Não tomar propriedade de um refresh legado por presumir que um
+            # slot globalmente inativo não tem processos usando o grant.
+            # O legado pode publicar um grant com refresh pendente; não copiar
+            # essa compatibilidade para a admissão do supervisor futuro.
+            auto_event("troca recusada: destino requer autenticacao valida")
+            print("Troca nao aplicada: destino requer autenticacao valida (waiting_auth).")
+            return False
         apply_slot(slot)
         fresh["last_switch"] = time.time()
+        advance_control(fresh)
         write_json(STORE, fresh)
         store.clear()
         store.update(fresh)
@@ -1224,6 +1346,10 @@ def do_switch(
     # "escolheu a menos pior". Foi exatamente o que faltou em 19/08/2026.
     # Sao percentuais e numeros de slot: nunca token, e-mail ou payload.
     auto_event(f"troca para o slot {key}" + (f" ({reason})" if reason else ""))
+    if auth == "refresh_required":
+        message = f"slot {key} refresh_required: renovacao pelo CLI pendente, acesso nao confirmado"
+        print(message)
+        auto_event(message)
     return True
 
 
@@ -1241,8 +1367,7 @@ def cmd_switch(args: argparse.Namespace) -> int:
     else:
         active = active_slot(store)
         target = keys[(keys.index(active) + 1) % len(keys)] if active else keys[0]
-    do_switch(store, target, reason="manual")
-    return 0
+    return 0 if do_switch(store, target, reason="manual") else 1
 
 
 def configure_pin(pin: str) -> tuple[str | None, bool]:
@@ -1252,11 +1377,13 @@ def configure_pin(pin: str) -> tuple[str | None, bool]:
         if pin == "off":
             changed = store.pop("pinned_slot", None) is not None
             if changed:
+                advance_control(store)
                 write_json(STORE, store)
             return None, False
         if pin not in store["slots"]:
             raise ValueError(f"Slot {pin} não existe. Tem: {', '.join(store['slots'])}")
         store["pinned_slot"] = pin
+        advance_control(store)
         write_json(STORE, store)
         return pin, active_slot(store) == pin
 
@@ -1269,6 +1396,14 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
         active = active_slot(store)
         stamp = time.strftime("%H:%M:%S")
         if active == pinned:
+            live_slot = {**store["slots"][pinned], "oauth": live_identity()[0]}
+            auth = slot_auth_state(live_slot)
+            if auth != "unverified":
+                state = "refresh_required" if auth == "refresh_required" else "waiting_auth"
+                message = f"slot {pinned} fixado; {state} ({auth})"
+                print(f"[{stamp}] {message}")
+                auto_event(message)
+                return 3, PINNED_CHECK_S
             print(f"[{stamp}] slot {pinned} fixado")
             return 2, PINNED_CHECK_S
         print(f"[{stamp}] fixação troca {active} -> {pinned}")
@@ -1276,10 +1411,17 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
             return 0, PINNED_CHECK_S
         return 2, PINNED_CHECK_S
     usage_map, err_map, active = collect(store)
-    target = pick_target(usage_map, args.threshold, args.strategy)
-    all_blocked = all_known_usage_blocked(usage_map)
+    # Não deixar o melhor snapshot com acesso inválido esconder outro candidato.
+    # O commit repete essa checagem; aqui não há refresh nem chamada de admissão.
+    target = pick_target(switchable_usage(store, usage_map), args.threshold, args.strategy)
+    all_blocked = all_known_usage_blocked(switchable_usage(store, usage_map))
     delay = float(args.poll) if args.poll else next_wake(usage_map, err_map, active)
     stamp = time.strftime("%H:%M:%S")
+    excluded = auth_exclusions(store)
+    if excluded:
+        message = "waiting_auth: " + "; ".join(excluded)
+        print(f"[{stamp}] {message}")
+        auto_event(message)  # sobrevive ao stdout silenciado do hook
     # HTTP 429 aqui veio da medicao de usage, nao de uma chamada ao modelo.
     # Nenhum erro de leitura prova falta de cota; token morto e o unico caso
     # acionavel porque foi classificado separadamente no refresh.
@@ -1298,12 +1440,20 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
     tail = f"  [{'; '.join(problems)}]" if problems else ""
     nxt = f"  proxima em {fmt_delay(delay)}"
     if target is None:
-        print(f"[{stamp}] {line}  sem cota conhecida{tail}{nxt}")
+        state = "waiting_auth: sem destino elegivel" if excluded else "sem cota conhecida"
+        print(f"[{stamp}] {line}  {state}{tail}{nxt}")
         return 3, delay
     if target == active:
-        state = "aguardando primeiro reset" if all_blocked else "ok"
+        active_usage = usage_map.get(active)
+        active_blocked = active_usage is not None and utilization(active_usage) >= 100
+        auth_held = bool(excluded) and pick_target(usage_map, args.threshold, args.strategy) != target
+        if active_blocked or auth_held:
+            state = "waiting_auth: alternativas excluidas" if excluded else "waiting_reset: ativa esgotada"
+            auto_event(state)
+        else:
+            state = "aguardando primeiro reset" if all_blocked else "ok"
         print(f"[{stamp}] {line}  {state}{tail}{nxt}")
-        return (3 if all_blocked else 2), delay
+        return (3 if all_blocked or active_blocked or auth_held else 2), delay
     waited = time.time() - store["last_switch"]
     if cooldown_blocks(usage_map, active, waited, args.cooldown):
         print(f"[{stamp}] {line}  cooldown {int(args.cooldown - waited)}s{tail}")
@@ -1318,8 +1468,11 @@ def check_once(args: argparse.Namespace) -> tuple[int, float]:
             else "limiar"
         )
     print(f"[{stamp}] {line}  trocando {active} -> {target}{tail}")
-    do_switch(store, target, reason=f"{motivo}; {line}")
-    return 0, delay
+    applied = do_switch(
+        store, target, reason=f"{motivo}; {line}",
+        expected=switch_guard(store, active, target),
+    )
+    return (0 if applied else 2), delay
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
@@ -1401,6 +1554,10 @@ def cmd_hook(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "fleet":
+        from fleet.cli import main as fleet_main
+        return fleet_main(argv[1:])
     ap = argparse.ArgumentParser(prog="ccx", description=__doc__.split("\n")[0])
     ap.add_argument("--threshold", type=float, default=CLAUDE_DEFAULT_THRESHOLD)
     ap.add_argument(
@@ -1413,9 +1570,15 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_add)
 
     p = sub.add_parser("status", help="as contas lado a lado")
+    p.add_argument("--visual", action="store_true")
+    p.add_argument("--no-color", action="store_true")
+    p.add_argument("--json", dest="as_json", action="store_true",
+                   help="snapshot sanitizado local, sem consultar APIs")
     p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("stats", help="status consolidado de Claude Code e Codex")
+    p.add_argument("--visual", action="store_true")
+    p.add_argument("--no-color", action="store_true")
     p.set_defaults(func=cmd_stats)
 
     p = sub.add_parser("switch", help="troca manual")
