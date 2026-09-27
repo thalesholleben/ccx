@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -181,7 +182,76 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(migrated.one('SELECT max_active FROM cells')['max_active'],0)
         self.assertEqual(migrated.one('SELECT max_active FROM service')['max_active'],0)
         with migrated.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],3)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],4)
+
+    def test_label_migration_and_edit_preserve_auth_jobs_and_identity(self):
+        worker=self.cell(weight=5);self.auth(worker)
+        home=self.store.home(worker)
+        credential=(home/'.credentials.json').read_bytes()
+        job=self.submit(cost=1);scheduler.dispatch(self.store)
+        before_worker=self.store.worker(worker)
+        before_job=self.store.one('SELECT * FROM jobs WHERE id=?',(job,))
+        before_reservation=self.store.one('SELECT * FROM reservations WHERE job_id=?',(job,))
+        with self.store.transaction() as db:
+            db.execute('DROP INDEX cells_display_name')
+            db.execute('ALTER TABLE cells DROP COLUMN display_name')
+            db.execute('PRAGMA user_version=3')
+        migrated=Store(self.store.root)
+        self.assertEqual(migrated.one('SELECT display_name FROM cells')['display_name'],'test')
+        migrated.configure('test',name='Cliente correto')
+        self.assertEqual(migrated.snapshot()['cells'][0]['display_name'],'Cliente correto')
+        self.assertEqual(migrated.worker(worker),before_worker)
+        self.assertEqual(migrated.one('SELECT * FROM jobs WHERE id=?',(job,)),before_job)
+        self.assertEqual(migrated.one('SELECT * FROM reservations WHERE job_id=?',(job,)),before_reservation)
+        self.assertEqual((migrated.home(worker)/'.credentials.json').read_bytes(),credential)
+        self.assertEqual(migrated.one('SELECT weight FROM cells')['weight'],5)
+        for invalid in ('','   ','bad\nlabel','x'*49):
+            with self.assertRaises(ValueError):migrated.configure('test',name=invalid)
+        other=migrated.add_cell(None,'codex','pro',label='Outra conta')
+        internal=migrated.worker(other)['cell_id']
+        self.assertTrue(internal.startswith('cell-'))
+        self.assertNotEqual(internal,'Outra conta')
+        with self.assertRaisesRegex(ValueError,'display_name_in_use'):migrated.configure(internal,name='Cliente correto',plan='custom',weight=8)
+        current=migrated.one('SELECT * FROM cells WHERE id=?',(internal,))
+        self.assertEqual((current['display_name'],current['plan'],current['weight']),('Outra conta','pro',1))
+
+    def test_cli_generates_cell_id_and_edits_label(self):
+        from fleet.cli import main
+        output=io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(['--root',str(self.base),'cell','add','Cliente A','claude','--plan','max20']),0)
+        account=Store(self.base).snapshot()['cells'][0]
+        internal=account['id']
+        self.assertEqual(account['display_name'],'Cliente A')
+        self.assertTrue(internal.startswith('cell-'))
+        self.assertIn('cell login '+internal,output.getvalue())
+        self.assertEqual(main(['--root',str(self.base),'cell','configure',internal,'--name','Cliente B']),0)
+        updated=Store(self.base).snapshot()['cells'][0]
+        self.assertEqual((updated['id'],updated['display_name'],updated['weight']),(internal,'Cliente B',20))
+        error=io.StringIO()
+        with contextlib.redirect_stderr(error):
+            self.assertEqual(main(['--root',str(self.base),'cell','add','cliente b','claude']),2)
+        self.assertIn('Já existe uma conta com esse nome',error.getvalue())
+
+    def test_labels_cannot_shadow_other_ids_or_names(self):
+        self.store.add_cell('conta-a','claude',label='Zulu')
+        worker=self.store.add_cell(None,'claude',label='Alpha')
+        internal=self.store.worker(worker)['cell_id']
+        before=self.store.rows('SELECT * FROM cells ORDER BY id')
+        profiles=list((self.base/'profiles').rglob('ccx-profile.json'))
+        with self.assertRaisesRegex(ValueError,'display_name_conflicts_id'):
+            self.store.add_cell(None,'claude',label='CONTA-A')
+        with self.assertRaisesRegex(ValueError,'display_name_conflicts_id'):
+            self.store.configure(internal,name='CONTA-A',plan='max20')
+        with self.assertRaisesRegex(ValueError,'cell_id_conflicts_name'):
+            self.store.add_cell('alpha','claude',label='Outro label')
+        with self.assertRaisesRegex(ValueError,'display_name_in_use'):
+            self.store.add_cell(None,'claude',label='ALPHA')
+        self.assertEqual(self.store.rows('SELECT * FROM cells ORDER BY id'),before)
+        self.assertEqual(list((self.base/'profiles').rglob('ccx-profile.json')),profiles)
+        self.assertEqual(len(self.store.rows('SELECT * FROM workers')),2)
+        self.assertEqual([c['display_name'] for c in self.store.snapshot()['cells']],['Alpha','Zulu'])
+        self.store.configure('conta-a',name='conta-a') # Its own ID remains a valid label.
 
     def test_upgrade_requires_old_service_exit_and_stop_remains_available(self):
         child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
@@ -488,7 +558,9 @@ class FleetTests(unittest.TestCase):
             self.launch(chosen)
             expected='failed' if index==0 else 'completed'
             eventually(lambda:self.store.one('SELECT state FROM jobs WHERE id=?',(job_id,))['state']==expected)
-            eventually(self.settled)
+            # Process death can occur between reconcile() and the live-PID check.
+            # Admission needs the worker released as well as the process gone.
+            eventually(lambda:self.settled() and not self.store.rows('SELECT id FROM workers WHERE job_id=?',(job_id,)))
         self.assertEqual(self.store.worker(dead)['auth'],'waiting_auth')
         self.assertEqual(len((self.store.root/'refresh-count.txt').read_text().splitlines()),1)
 

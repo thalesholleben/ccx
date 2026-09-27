@@ -69,9 +69,28 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
         dialog.update_idletasks()
         next(w for w in descendants(dialog) if isinstance(w,ttk.Button) and w.cget('text')=='Adicionar conta').invoke()
     def check_registration():
-        cell=store.one("SELECT * FROM cells WHERE id='cadastro-simples'")
+        cell=store.one("SELECT * FROM cells WHERE display_name='cadastro-simples'")
+        assert cell['id'].startswith('cell-') and cell['id']!='cadastro-simples'
         assert (cell['weight'],cell['weekly_weight'],cell['reserve'],cell['max_active'])==(20,1,10,0)
         panel.render(store.snapshot())
+    def edit_account():
+        panel.open_account('principal-max20')
+        captured=[];original=panel.dialog
+        def record(*args):
+            result=original(*args);captured.append(result);return result
+        panel.dialog=record
+        try:panel.configure()
+        finally:panel.dialog=original
+        dialog,frame,fields=captured[0]
+        assert set(fields)=={'name','plan'}
+        fields['name'].set('Cliente correto')
+        next(w for w in descendants(dialog) if isinstance(w,ttk.Button) and w.cget('text')=='Salvar').invoke()
+    def check_edit():
+        cell=store.one("SELECT * FROM cells WHERE id='principal-max20'")
+        assert cell['display_name']=='Cliente correto' and cell['auth']=='ready' and cell['weight']==20
+        panel.render(store.snapshot())
+        assert panel.cells.item('principal-max20','text')=='Cliente correto'
+        assert list(panel.cells.get_children())==[c['id'] for c in store.snapshot()['cells']]
     def later(delay,callback):
         panel.window.after(delay,callback)
     later(100,registration)
@@ -88,7 +107,9 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
     later(3000,lambda:capture('jobs'))
     later(3200,lambda:panel.nav['activity'].invoke())
     later(3400,lambda:capture('activity'))
-    later(3600,panel.window.destroy)
+    later(3600,edit_account)
+    later(4000,check_edit)
+    later(4200,panel.window.destroy)
     panel.window.mainloop()
     if errors:
         raise AssertionError(errors)

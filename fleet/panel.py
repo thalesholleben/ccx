@@ -38,7 +38,8 @@ class Panel(Shell):
                 callback()
                 self.messages.put(('notice','Operação concluída.'))
             except Exception as exc:
-                self.messages.put(('error','Operação recusada ('+type(exc).__name__+'). Verifique a seleção, os campos e o estado do serviço.'))
+                message=terminal.NAME_ERRORS.get(str(exc),'Operação recusada ('+type(exc).__name__+'). Verifique a seleção, os campos e o estado do serviço.')
+                self.messages.put(('error',message))
         threading.Thread(target=task,daemon=True).start()
         self.notice.configure(text='Executando...')
 
@@ -73,9 +74,11 @@ class Panel(Shell):
             values=(cell['provider'],f"{cell['plan']} / x{cell['weight']:g}",'Pausada' if cell['paused'] else STATE.get(cell['auth'],cell['auth']),
                     quota,f'{reserved:.1f}pp máx.',str(cell['active']),
                     ('Vencida' if data['at']-cell['observed']>600 else terminal.duration(data['at']-cell['observed'])) if cell['observed'] else 'Desconhecida')
-            self.row(self.cells,cell['id'],cell['id'],values)
+            self.row(self.cells,cell['id'],cell.get('display_name') or cell['id'],values)
+            self.cells.move(cell['id'],'','end')
+        names={cell['id']:cell.get('display_name') or cell['id'] for cell in data['cells']}
         for job in data['jobs']:
-            self.row(self.jobs,job['id'],job['id'][:8],(terminal.clean(job['title']),STATE.get(job['state'],job['state']),job['cell_id'] or 'Automática',job['reason']))
+            self.row(self.jobs,job['id'],job['id'][:8],(terminal.clean(job['title']),STATE.get(job['state'],job['state']),names.get(job['cell_id'],job['cell_id']) or 'Automática',job['reason']))
         ids={job['id'] for job in data['jobs']}
         for key in self.jobs.get_children():
             if key not in ids:
@@ -107,7 +110,7 @@ class Panel(Shell):
                 factor=cell['weight'] if win['seconds']<=86400 and not win.get('model') else cell['weekly_weight']
                 free=max(0,100-win['used']-cell['reserved'].get(win['key'],0)-cell['reserve'])*factor/100
                 parts.append(f"{win.get('model') or terminal.duration(win['seconds'])}: folga estimada {free:.2f}x, reset {terminal.reset_label(win['reset'])}")
-            self.details.configure(text=' | '.join(parts)+f"\n{len(cell['workers'])} perfis • sem teto fixo de agentes"+(f" • {cell['error']}" if cell['error'] else ''))
+            self.details.configure(text=' | '.join(parts)+f"\n{len(cell['workers'])} perfis • sem teto fixo de agentes"+(f" • {cell['error']}" if cell['error'] else '')+f"\nID para integrações: {cell['id']}")
 
     def job_detail(self):
         selected=self.jobs.selection()
@@ -132,7 +135,7 @@ class Panel(Shell):
 
     def add_cell(self):
         dialog,frame,fields=self.dialog('Adicionar conta',[
-            ('Nome curto (ex.: claude-max20)','name','',None),('Provedor','provider','claude',['claude','codex']),
+            ('Nome da conta (ex.: Cliente A)','name','',None),('Provedor','provider','claude',['claude','codex']),
             ('Plano','plan','pro',plans('claude'))])
         plan_entry=next(widget for widget in frame.winfo_children()
                         if isinstance(widget,ttk.Combobox) and str(widget.cget('textvariable'))==str(fields['plan']))
@@ -144,7 +147,7 @@ class Panel(Shell):
         fields['provider'].trace_add('write',provider_changed)
         def save():
             values={k:v.get() for k,v in fields.items()}
-            self.action(lambda:self.store.add_cell(values['name'],values['provider'],values['plan']))
+            self.action(lambda:self.store.add_cell(None,values['provider'],values['plan'],label=values['name']))
             dialog.destroy()
         ttk.Button(frame,text='Adicionar conta',style='Accent.TButton',command=save).pack(fill='x',pady=(20,0))
 
@@ -158,11 +161,13 @@ class Panel(Shell):
         cell=next((c for c in self.snapshot['cells'] if c['id']==cell_id),None)
         if not cell:
             return
-        dialog,frame,fields=self.dialog('Alterar plano',[
+        dialog,frame,fields=self.dialog('Editar conta',[
+            ('Nome da conta','name',cell.get('display_name') or cell['id'],None),
             ('Plano','plan',cell['plan'],plans(cell['provider']))])
         def save():
+            name=fields['name'].get()
             plan=fields['plan'].get()
-            self.action(lambda:self.store.configure(cell_id,plan=plan))
+            self.action(lambda:self.store.configure(cell_id,name=name,plan=plan if plan!=cell['plan'] else None))
             dialog.destroy()
         ttk.Button(frame,text='Salvar',command=save).pack(fill='x',pady=15)
 

@@ -17,9 +17,13 @@ Nenhum wrapper no PATH, hook global ou tarefa automática de logon foi instalado
 Abra `ccx-panel.cmd` com dois cliques. Cadastre a conta, selecione a linha, faça
 login e inicie o serviço. O CLI oferece o mesmo fluxo:
 
-O cadastro pede apenas **nome, provedor e plano**. Peso por sessão vem do plano,
+O cadastro pede apenas **nome, provedor e plano**. O nome é um label; o ID interno
+é único e gerado automaticamente. Em **Editar conta**, altere o nome e/ou plano
+sem trocar o ID, login, perfis ou vínculos de tarefas. Nos comandos abaixo,
+substitua `ID_DA_CONTA` pelo ID impresso no cadastro ou no status. Peso por sessão vem do plano,
 peso semanal começa em 1 e margem reservada em 10%. Esses parâmetros são internos
-no painel. **Alterar plano** recalcula o peso por sessão. Não há teto numérico de
+no painel. Alterar o plano recalcula o peso por sessão; editar só o nome preserva
+o peso atual. Não há teto numérico de
 agentes, global ou por conta; cota, perfis autenticados disponíveis e exclusão de
 escrita na mesma pasta continuam governando o despacho.
 
@@ -35,9 +39,9 @@ Se o Explorer não disponibilizar a bandeja, o painel mantém fechamento normal.
 python ccx-fleet.py cell add pessoal claude --plan pro
 python ccx-fleet.py cell add equipe claude --plan max5
 python ccx-fleet.py cell add principal claude --plan max20
-python ccx-fleet.py cell login pessoal
-python ccx-fleet.py cell login equipe
-python ccx-fleet.py cell login principal
+python ccx-fleet.py cell login ID_DA_CONTA
+python ccx-fleet.py cell login ID_DA_CONTA
+python ccx-fleet.py cell login ID_DA_CONTA
 python ccx-fleet.py service start
 python ccx-fleet.py status
 ```
@@ -47,19 +51,20 @@ adicione e autentique outro worker. Não há campo para limitar agentes: cada pe
 continua exclusivo de uma execução por vez.
 
 ```powershell
-python ccx-fleet.py worker add principal
-python ccx-fleet.py cell login principal --worker ID_DO_WORKER
-python ccx-fleet.py cell configure principal --plan max20
-python ccx-fleet.py cell pause principal
-python ccx-fleet.py cell resume principal
+python ccx-fleet.py worker add ID_DA_CONTA
+python ccx-fleet.py cell login ID_DA_CONTA --worker ID_DO_WORKER
+python ccx-fleet.py cell configure ID_DA_CONTA --plan max20
+python ccx-fleet.py cell pause ID_DA_CONTA
+python ccx-fleet.py cell resume ID_DA_CONTA
 ```
 
 O login usa o CLI oficial com home dedicada. Não copie tokens dos arquivos globais.
 Login adicional na mesma conta depende da coexistência de grants permitida pelo
 provedor. Antes de ampliar workers, valide que os demais perfis e a sessão global
 continuam autenticados. Esse canário exige login humano e não foi substituído por
-testes sintéticos. Conta Codex: `cell add nome codex --plan custom --weight 1`;
-o operador informa o peso, sem inferir assinatura a partir de uso zero.
+testes sintéticos. Conta Codex: `cell add "Nome visível" codex --plan custom --weight 1`;
+o comando imprime o ID para o login e o despacho. O operador informa o peso,
+sem inferir assinatura a partir de uso zero.
 
 ## Enviar e acompanhar
 

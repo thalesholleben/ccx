@@ -46,3 +46,14 @@ preserves the service and jobs. Automatic logon startup is not installed.
 Completion means real account logins, successful canaries and every intended
 executor explicitly routed through the fleet. If any of those are pending,
 report them instead of calling migration complete.
+
+## Account labels (schema 4)
+
+Schema 4 adds an editable `display_name`, initially copied from the existing ID.
+It never renames cells, workers, jobs, reservations, profile paths or credentials.
+New registrations in the panel and CLI generate an opaque unique ID. The user
+chooses a label; `cell configure CELL_ID --name "New label"` edits it. The panel
+exposes the same operation in **Editar conta**. Renaming alone keeps custom weights.
+Integration commands continue using the immutable ID printed at registration or
+shown in `status`. Names must be printable, nonempty and at most 48 characters;
+duplicate names are refused. Existing account IDs remain valid after the update.

@@ -22,7 +22,8 @@ cost and reserves capacity across session, weekly and model-specific limits.
 
 - **One account, multiple isolated workers.** Every worker has its own authenticated
   profile. Accounts sharing an identity cannot be registered as independent pools.
-- **Compact capacity dashboard.** Register a name, provider and plan; inspect limits,
+- **Compact capacity dashboard.** Register a label, provider and plan; edit the label without changing the
+  generated account ID or login. Inspect limits,
   account health and jobs. Tasks arrive through the CLI and integrations.
 - **Independent execution.** Closing the dashboard keeps the service and agents
   running. The Windows tray icon opens or hides the panel.
@@ -49,11 +50,11 @@ python ccx-fleet.py panel
 
 On Windows, double-click `ccx-panel.cmd`. Register an account, then select **Login**
 and complete the official provider flow. Each account starts with one worker.
-For a terminal-only setup:
+For a terminal-only setup (replace CELL_ID with the ID printed by registration):
 
 ```sh
 python ccx-fleet.py cell add account-a claude --plan pro
-python ccx-fleet.py cell login account-a
+python ccx-fleet.py cell login CELL_ID
 python ccx-fleet.py service start
 python ccx-fleet.py status
 ```
@@ -64,7 +65,7 @@ Submit an authorized task from a UTF-8 file:
 python ccx-fleet.py run claude --prompt-file task.md --cwd /path/to/project --request-id review-001 --timeout 900
 ```
 
-Target a particular account with `--cell account-a`. Omit it for automatic
+Account creation prints its generated ID. Use that ID for login and `--cell CELL_ID`. Omit it for automatic
 selection. To authorize file changes, add `--permission write`. The default is
 read-only; Claude's read-only mode does not enable shell commands. Specify
 `--model` and `--effort` when required. See the [command reference](skills/ccx/references/commands.md).

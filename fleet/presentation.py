@@ -55,7 +55,8 @@ class Capacity(tk.Canvas):
             x,y=(i%cols)*(card_width+10),(i//cols)*166
             tag='cell:'+cell['id']
             rounded(self,x,y,card_width,156,10,fill=CARD,outline=LINE,tags=tag)
-            name=cell['id'] if len(cell['id'])<25 else cell['id'][:23]+'…'
+            name=cell.get('display_name') or cell['id']
+            name=name if len(name)<25 else name[:23]+'…'
             label(self,x+16,y+12,name,font=('Segoe UI Semibold',11),tags=tag)
             rounded(self,x+card_width-56,y+10,40,23,6,fill=RAISED,outline='',tags=tag)
             label(self,x+card_width-36,y+21,f"x{cell['weight']:g}",font=(self.owner.mono,9),fill=ACCENT,anchor='center',tags=tag)
@@ -260,7 +261,7 @@ class Shell:
         self.cells.bind('<<TreeviewSelect>>',lambda _:self.detail())
         toolbar=ttk.Frame(parent)
         toolbar.pack(fill='x',pady=18)
-        for text,callback in [('Fazer login',self.login),('Novo perfil',self.add_worker),('Alterar plano',self.configure),('Pausar / retomar',self.pause)]:
+        for text,callback in [('Fazer login',self.login),('Novo perfil',self.add_worker),('Editar conta',self.configure),('Pausar / retomar',self.pause)]:
             ttk.Button(toolbar,text=text,command=callback).pack(side='left',padx=(0,10))
         self.details=ttk.Label(parent,text='Selecione uma conta para ver limites, resets e perfis.',style='Muted.TLabel',wraplength=750,justify='left')
         self.details.pack(anchor='w',pady=14)
@@ -310,5 +311,7 @@ class Shell:
         self.start_button.configure(text='Serviço ativo' if healthy else 'Iniciar serviço',state='disabled' if healthy else 'normal')
         self.capacity.data=data['cells']; self.capacity.draw(); self.draw_metrics()
         self.events.delete(*self.events.get_children())
+        names={cell['id']:cell.get('display_name') or cell['id'] for cell in data['cells']}
         for i,item in enumerate(data['events'][:50]):
-            self.events.insert('', 'end',text=f'{i+1:02d}',values=(time.strftime('%H:%M:%S',time.localtime(item['at'])),item['kind'],item['entity'][:32] or 'Serviço'))
+            reference=names.get(item['entity'],item['entity'])
+            self.events.insert('', 'end',text=f'{i+1:02d}',values=(time.strftime('%H:%M:%S',time.localtime(item['at'])),item['kind'],reference[:48] or 'Serviço'))

@@ -41,6 +41,8 @@ Pillow is optional for screenshots/icon exports. Runtime must stay stdlib-only.
   process tree exits, even after a terminal event.
 - Preserve permissions, model, effort, recursion guards and explicit account affinity.
 - Errors/logs must not reveal credentials or private prompts. Never commit real state.
+- Schema 4 adds display_name without changing IDs or credentials. UI/CLI registration
+  generates an internal ID; label edits preserve jobs, reservations and profile paths.
 - Registration UI has name/provider/plan only. The dashboard monitors accounts and
   jobs; it does not create tasks.
 

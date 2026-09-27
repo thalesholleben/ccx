@@ -54,6 +54,7 @@ def main(argv=None):
     cells.add_parser('list')
     config = cells.add_parser('configure')
     config.add_argument('name')
+    config.add_argument('--name',dest='display_name',help='nome visível; preserva o ID e o login')
     config.add_argument('--plan',choices=('pro','max5','max20','custom'))
     config.add_argument('--weight',type=float)
     config.add_argument('--weekly-weight',type=float)
@@ -114,12 +115,15 @@ def main(argv=None):
                 terminal.fleet(snapshot,getattr(args,'no_color',False))
         elif args.action=='cell':
             if args.operation=='add':
-                print('Worker criado: '+store.add_cell(args.name,args.provider,args.plan,args.weight,args.weekly_weight,args.reserve))
-                print('Proximo passo: cell login '+args.name)
+                worker=store.add_cell(None,args.provider,args.plan,args.weight,args.weekly_weight,args.reserve,label=args.name)
+                cell_id=store.worker(worker)['cell_id']
+                print('Conta criada: '+cell_id)
+                print('Worker criado: '+worker)
+                print('Proximo passo: cell login '+cell_id)
             elif args.operation in ('pause','resume'):
                 store.pause(args.name,args.operation=='pause')
             elif args.operation=='configure':
-                store.configure(args.name,plan=args.plan,weight=args.weight,weekly_weight=args.weekly_weight,reserve=args.reserve)
+                store.configure(args.name,name=args.display_name,plan=args.plan,weight=args.weight,weekly_weight=args.weekly_weight,reserve=args.reserve)
             elif args.operation=='login':
                 workers = store.rows('SELECT id FROM workers WHERE cell_id=? ORDER BY id',(args.name,))
                 selected = args.worker or (workers[0]['id'] if workers else '')
@@ -153,6 +157,8 @@ def main(argv=None):
         code = str(exc).split(':')[0]
         if code == 'upgrade_requires_service_stop':
             print('CCX: pare o serviço antes de atualizar (service stop), aguarde sua saída e inicie novamente. Os runners continuam vivos.',file=sys.stderr)
+        elif code in terminal.NAME_ERRORS:
+            print('CCX: '+terminal.NAME_ERRORS[code],file=sys.stderr)
         elif code in allowed:
             print('CCX: '+code+'. Abra ccx-panel.cmd pelo Explorer para iniciar fora do agente.',file=sys.stderr)
         else:

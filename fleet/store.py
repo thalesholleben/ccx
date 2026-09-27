@@ -27,6 +27,21 @@ def plans(provider):
     return ('pro', 'custom') if provider == 'codex' else tuple(PLAN_WEIGHTS)
 
 
+def short_name(value):
+    if not isinstance(value,str) or not value.isprintable() or not 1 <= len(value.strip()) <= 48:
+        raise ValueError('invalid_display_name')
+    return value.strip()
+
+
+def available_name(db, cell_id, display_name):
+    if db.execute('SELECT 1 FROM cells WHERE id!=? AND display_name=? COLLATE NOCASE',
+                  (cell_id, display_name)).fetchone():
+        raise ValueError('display_name_in_use')
+    if db.execute('SELECT 1 FROM cells WHERE id!=? AND id=? COLLATE NOCASE',
+                  (cell_id, display_name)).fetchone():
+        raise ValueError('display_name_conflicts_id')
+
+
 def number(value, low=0, high=100):
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
         raise ValueError('invalid_number')
@@ -57,19 +72,19 @@ class Store:
         self.path = self.root / 'fleet.sqlite3'
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError('unsupported_schema')
+            if version and not migrate:
+                return
             if version in (1, 2):
                 # The old scheduler interprets max_active=0 as zero slots. Let
                 # service stop open the old schema, but never migrate under it.
-                if not migrate:
-                    return
                 owner = db.execute('SELECT pid,marker FROM service').fetchone()
                 if owner and processes.live(owner['pid'], owner['marker']):
                     raise RuntimeError('upgrade_requires_service_stop')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS cells(
-                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, plan TEXT NOT NULL,
+                    id TEXT PRIMARY KEY, display_name TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL, plan TEXT NOT NULL,
                     weight REAL NOT NULL, weekly_weight REAL NOT NULL, reserve REAL NOT NULL,
                     max_active INTEGER NOT NULL, paused INTEGER NOT NULL DEFAULT 0,
                     identity TEXT, auth TEXT NOT NULL DEFAULT 'waiting_auth',
@@ -112,7 +127,11 @@ class Store:
                     for cell in db.execute('SELECT id,provider,plan FROM cells').fetchall():
                         if cell['plan'] not in plans(cell['provider']):
                             db.execute("UPDATE cells SET plan='custom' WHERE id=?", (cell['id'],))
-                db.execute('PRAGMA user_version=3')
+                if 'display_name' not in {row[1] for row in db.execute('PRAGMA table_info(cells)')}:
+                    db.execute("ALTER TABLE cells ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
+                db.execute("UPDATE cells SET display_name=id WHERE display_name=''")
+                db.execute('CREATE UNIQUE INDEX IF NOT EXISTS cells_display_name ON cells(display_name COLLATE NOCASE)')
+                db.execute('PRAGMA user_version=4')
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -149,7 +168,11 @@ class Store:
             raise ValueError('not_found')
         return rows[0]
 
-    def add_cell(self, name, provider, plan='custom', weight=None, weekly_weight=1, reserve=10):
+    def add_cell(self, name, provider, plan='custom', weight=None, weekly_weight=1, reserve=10, *, label=None):
+        # UI/CLI pass None to allocate an opaque ID. Explicit IDs remain compatible
+        # with existing integrations; changing a label never changes that ID.
+        name = 'cell-' + uuid.uuid4().hex if name is None else name
+        display_name = short_name(name if label is None else label)
         if not ID.fullmatch(name) or provider not in ('claude', 'codex') or plan not in plans(provider):
             raise ValueError('invalid_cell')
         weight = PLAN_WEIGHTS[plan] if weight is None else weight
@@ -157,8 +180,12 @@ class Store:
         number(weekly_weight, .1, 100)
         number(reserve, 0, 80)
         with self.transaction() as db:
-            db.execute('INSERT INTO cells(id,provider,plan,weight,weekly_weight,reserve,max_active) VALUES(?,?,?,?,?,?,?)',
-                       (name, provider, plan, weight, weekly_weight, reserve, 0))
+            available_name(db, name, display_name)
+            if db.execute('SELECT 1 FROM cells WHERE id!=? AND display_name=? COLLATE NOCASE',
+                          (name, name)).fetchone():
+                raise ValueError('cell_id_conflicts_name')
+            db.execute('INSERT INTO cells(id,display_name,provider,plan,weight,weekly_weight,reserve,max_active) VALUES(?,?,?,?,?,?,?,?)',
+                       (name, display_name, provider, plan, weight, weekly_weight, reserve, 0))
             event(db, 'cell_added', name)
         return self.add_worker(name)
 
@@ -220,7 +247,7 @@ class Store:
                 raise ValueError('not_found')
             event(db, 'cell_paused' if paused else 'cell_resumed', cell_id)
 
-    def configure(self, cell_id, *, plan=None, weight=None, weekly_weight=None, reserve=None):
+    def configure(self, cell_id, *, name=None, plan=None, weight=None, weekly_weight=None, reserve=None):
         if plan is not None:
             cell = self.one('SELECT provider FROM cells WHERE id=?', (cell_id,))
             if plan not in plans(cell['provider']):
@@ -231,9 +258,13 @@ class Store:
             number(value,0 if key=='reserve' else .1,80 if key=='reserve' else 100)
         if plan is not None:
             values['plan'] = plan
+        if name is not None:
+            values['display_name'] = short_name(name)
         if not values:
             return
         with self.transaction() as db:
+            if 'display_name' in values:
+                available_name(db, cell_id, values['display_name'])
             if db.execute('UPDATE cells SET '+','.join(key+'=?' for key in values)+' WHERE id=?',(*values.values(),cell_id)).rowcount!=1:
                 raise ValueError('not_found')
             event(db,'cell_configured',cell_id)
@@ -304,7 +335,7 @@ class Store:
     def snapshot(self):
         service = self.one('SELECT * FROM service')
         service['alive'] = processes.live(service['pid'], service['marker'])
-        cells = self.rows('SELECT * FROM cells ORDER BY provider,id')
+        cells = self.rows('SELECT * FROM cells ORDER BY provider,display_name COLLATE NOCASE,id')
         for cell in cells:
             cell.pop('identity', None)
             cell['windows'] = json.loads(cell['windows'])

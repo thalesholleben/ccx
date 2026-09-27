@@ -51,8 +51,12 @@ python ccx-fleet.py run claude --prompt-file tarefa.md --cwd C:\work\app --reque
 Quando o usuário pedir **a conta X**, use o ID cadastrado e `--cell`:
 
 ```powershell
-python ccx-fleet.py run claude --cell conta-x --prompt-file tarefa.md --cwd C:\work\app --request-id revisao-123 --timeout 900
+python ccx-fleet.py run claude --cell ID_DA_CONTA --prompt-file tarefa.md --cwd C:\work\app --request-id revisao-123 --timeout 900
 ```
+
+O cadastro gera um ID interno e guarda o nome escolhido como label. Consulte
+`status --json`: `id` é o identificador para comandos, `display_name` é editável.
+Alterar o label preserva login, perfis, tarefas e o ID.
 
 `--cell` restringe esta tarefa à conta indicada. Não muda o login global e não faz
 fallback para outra conta se ela estiver indisponível. Confira antes se o ID existe,

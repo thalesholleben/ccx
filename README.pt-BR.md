@@ -15,14 +15,16 @@ livres e conflito de escrita determinam a admissão.
 
 Windows, Python 3.12+ com Tkinter e os CLIs oficiais no PATH. Sem dependência de
 runtime via pip. Abra `ccx-panel.cmd`, cadastre nome/provedor/plano e faça login.
+O nome é um label editável em **Editar conta**. O ID é gerado automaticamente;
+use o ID mostrado no cadastro no lugar de `ID_DA_CONTA` nos comandos.
 O ícone da bandeja abre/oculta a janela. Serviço e agentes continuam funcionando
 com o painel fechado; não há instalação automática de início com o Windows.
 
 ```sh
 python ccx-fleet.py status
 python ccx-fleet.py cell add conta-a claude --plan max5
-python ccx-fleet.py cell login conta-a
-python ccx-fleet.py run claude --cell conta-a --prompt-file tarefa.md --cwd C:/projetos/app --request-id revisao-001 --timeout 900
+python ccx-fleet.py cell login ID_DA_CONTA
+python ccx-fleet.py run claude --cell ID_DA_CONTA --prompt-file tarefa.md --cwd C:/projetos/app --request-id revisao-001 --timeout 900
 python scripts/install-skill.py both
 ```
 

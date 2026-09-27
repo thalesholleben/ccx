@@ -8,6 +8,13 @@ import unicodedata
 
 import ccx
 
+NAME_ERRORS = {
+    'invalid_display_name': 'Use um nome de 1 a 48 caracteres, sem caracteres de controle.',
+    'display_name_in_use': 'Já existe uma conta com esse nome. Escolha outro nome.',
+    'display_name_conflicts_id': 'Esse nome é o ID de outra conta. Escolha outro nome.',
+    'cell_id_conflicts_name': 'Esse ID é o nome de outra conta. Escolha outro ID.',
+}
+
 
 def clean(value):
     return ''.join(char for char in str(value) if not unicodedata.category(char).startswith('C'))
@@ -111,7 +118,10 @@ def fleet(snapshot, no_color=False):
     for cell in snapshot['cells']:
         out.rule()
         state = 'PAUSADA' if cell['paused'] else cell['auth'].upper()
-        out.line(f"  {cell['id']}  /  {cell['provider']}  /  {cell['plan']} x{cell['weight']:g}", '1')
+        name=cell.get('display_name') or cell['id']
+        out.line(f"  {name}  /  {cell['provider']}  /  {cell['plan']} x{cell['weight']:g}", '1')
+        if name!=cell['id']:
+            out.line(f"  ID: {cell['id']}", '90')
         out.line(f"  {state} | agentes ativos {cell['active']} | perfis {len(cell['workers'])}")
         age = max(0,snapshot['at']-cell['observed'])
         out.line(f"  Leitura: {duration(age)} atras"+('  [VENCIDA]' if age>600 else '') if cell['observed'] else '  Leitura: desconhecida', '90')

@@ -11,22 +11,25 @@ python ccx-fleet.py service status
 python ccx-fleet.py service stop
 
 python ccx-fleet.py cell add conta-x claude --plan max20
-python ccx-fleet.py cell login conta-x
-python ccx-fleet.py worker add conta-x
-python ccx-fleet.py cell login conta-x --worker ID_DO_WORKER
-python ccx-fleet.py cell configure conta-x --plan max5
-python ccx-fleet.py cell pause conta-x
-python ccx-fleet.py cell resume conta-x
+python ccx-fleet.py cell login ID_DA_CONTA
+python ccx-fleet.py worker add ID_DA_CONTA
+python ccx-fleet.py cell login ID_DA_CONTA --worker ID_DO_WORKER
+python ccx-fleet.py cell configure ID_DA_CONTA --plan max5
+python ccx-fleet.py cell pause ID_DA_CONTA
+python ccx-fleet.py cell resume ID_DA_CONTA
 ```
 
-Cadastro no painel: nome, provedor e plano. Claude: pro/max5/max20/custom; Codex:
+Cadastro no painel: label, provedor e plano. `cell add` gera e imprime um ID
+interno único. Substitua `ID_DA_CONTA` nos exemplos pelo ID retornado.
+Use `cell configure ID_DA_CONTA --name "Novo nome"` para editar o label.
+Nome visível e ID são distintos; `--cell` sempre recebe o ID estável. Claude: pro/max5/max20/custom; Codex:
 pro/custom. Não inferir plano a partir de usage 0%. Os nomes de plano do CCX são
 perfis de capacidade, não uma consulta automática à assinatura. O CLI conserva
 ajuste avançado de peso, peso semanal e margem; não alterar sem necessidade e
 evidência. Não existe mais `--max-active`.
 
 ```powershell
-python ccx-fleet.py submit claude --cell conta-x --prompt-file tarefa.md --cwd C:\work\app --title "Revisar implementação" --cost 15 --request-id revisao-123
+python ccx-fleet.py submit claude --cell ID_DA_CONTA --prompt-file tarefa.md --cwd C:\work\app --title "Revisar implementação" --cost 15 --request-id revisao-123
 python ccx-fleet.py run codex --prompt-file tarefa.md --cwd C:\work\app --permission write --effort high --request-id implementacao-123 --timeout 900
 python ccx-fleet.py wait ID_DA_TAREFA --timeout 900
 python ccx-fleet.py cancel ID_DA_TAREFA
