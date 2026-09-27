@@ -63,7 +63,7 @@ class FleetTests(unittest.TestCase):
 
     def settled(self):
         service.reconcile(self.store)
-        return not self.store.rows('SELECT id FROM workers WHERE job_id IS NOT NULL') and not any(processes.live(j['pid'],j['marker']) for j in self.store.rows('SELECT * FROM jobs'))
+        return not self.store.rows('SELECT id FROM workers WHERE job_id IS NOT NULL AND pid IS NOT NULL') and not any(processes.live(j['pid'],j['marker']) for j in self.store.rows('SELECT * FROM jobs'))
 
     def cell(self,name='test',weight=1,workers=1,weekly=0):
         worker=self.store.add_cell(name,'claude','custom',weight=weight)
