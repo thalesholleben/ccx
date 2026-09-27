@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import ccx
-from .store import Store, TERMINAL, GUARDS
+from .store import Store, TERMINAL, GUARDS, plans
 from . import providers, runner, service, terminal
 
 
@@ -47,7 +47,7 @@ def main(argv=None):
     add = cells.add_parser('add')
     add.add_argument('name')
     add.add_argument('provider',choices=('claude','codex'))
-    add.add_argument('--plan',default='pro',choices=('pro','max5','max20','custom'))
+    add.add_argument('--plan',choices=('plus','pro','max5','max20','custom'),help='padrao: Claude pro, Codex plus')
     add.add_argument('--weight',type=float)
     add.add_argument('--weekly-weight',type=float,default=1)
     add.add_argument('--reserve',type=float,default=10)
@@ -55,10 +55,13 @@ def main(argv=None):
     config = cells.add_parser('configure')
     config.add_argument('name')
     config.add_argument('--name',dest='display_name',help='nome visível; preserva o ID e o login')
-    config.add_argument('--plan',choices=('pro','max5','max20','custom'))
+    config.add_argument('--plan',choices=('plus','pro','max5','max20','custom'))
     config.add_argument('--weight',type=float)
     config.add_argument('--weekly-weight',type=float)
     config.add_argument('--reserve',type=float)
+    remove=cells.add_parser('remove',help='remove conta e perfis locais; preserva histórico de tarefas')
+    remove.add_argument('name')
+    remove.add_argument('--yes',action='store_true',required=True,help='confirma remoção dos perfis locais')
     for operation in ('pause','resume','login'):
         command = cells.add_parser(operation)
         command.add_argument('name')
@@ -115,7 +118,7 @@ def main(argv=None):
                 terminal.fleet(snapshot,getattr(args,'no_color',False))
         elif args.action=='cell':
             if args.operation=='add':
-                worker=store.add_cell(None,args.provider,args.plan,args.weight,args.weekly_weight,args.reserve,label=args.name)
+                worker=store.add_cell(None,args.provider,args.plan or plans(args.provider)[0],args.weight,args.weekly_weight,args.reserve,label=args.name)
                 cell_id=store.worker(worker)['cell_id']
                 print('Conta criada: '+cell_id)
                 print('Worker criado: '+worker)
@@ -124,6 +127,9 @@ def main(argv=None):
                 store.pause(args.name,args.operation=='pause')
             elif args.operation=='configure':
                 store.configure(args.name,name=args.display_name,plan=args.plan,weight=args.weight,weekly_weight=args.weekly_weight,reserve=args.reserve)
+            elif args.operation=='remove':
+                store.remove_cell(args.name)
+                print('Conta removida. Histórico de tarefas preservado.')
             elif args.operation=='login':
                 workers = store.rows('SELECT id FROM workers WHERE cell_id=? ORDER BY id',(args.name,))
                 selected = args.worker or (workers[0]['id'] if workers else '')

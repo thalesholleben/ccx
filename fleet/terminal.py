@@ -13,6 +13,9 @@ NAME_ERRORS = {
     'display_name_in_use': 'Já existe uma conta com esse nome. Escolha outro nome.',
     'display_name_conflicts_id': 'Esse nome é o ID de outra conta. Escolha outro nome.',
     'cell_id_conflicts_name': 'Esse ID é o nome de outra conta. Escolha outro ID.',
+    'cell_busy': 'A conta está em uso. Aguarde o login ou a tarefa terminar antes de remover.',
+    'cell_has_queued_jobs': 'Há tarefas na fila vinculadas a essa conta. Cancele ou conclua essas tarefas antes de remover.',
+    'cell_removed_cleanup_pending': 'Conta removida, mas alguns arquivos de perfil não puderam ser apagados. Consulte o evento cell_profile_cleanup_failed e a pasta privada profiles.',
 }
 
 

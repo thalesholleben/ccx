@@ -35,6 +35,12 @@ class Capacity(tk.Canvas):
         super().__init__(parent,bg=BG,highlightthickness=0,height=156,cursor='hand2')
         self.owner=owner
         self.data=[]
+        assets=Path(__file__).resolve().parents[1]/'assets'
+        self.provider_icons={}
+        for provider,filename in [('claude','claude-logo.png'),('codex','openai-logo.png')]:
+            if (assets/filename).is_file():
+                self.provider_icons[provider]=tk.PhotoImage(master=self,file=str(assets/filename)).subsample(2)
+        self.name_font=tkfont.Font(self,family='Segoe UI Semibold',size=11)
         self.bind('<Configure>',lambda _:self.draw())
 
     def draw(self):
@@ -56,8 +62,14 @@ class Capacity(tk.Canvas):
             tag='cell:'+cell['id']
             rounded(self,x,y,card_width,156,10,fill=CARD,outline=LINE,tags=tag)
             name=cell.get('display_name') or cell['id']
-            name=name if len(name)<25 else name[:23]+'…'
-            label(self,x+16,y+12,name,font=('Segoe UI Semibold',11),tags=tag)
+            icon=self.provider_icons.get(cell['provider'])
+            left=x+46 if icon else x+16
+            if icon:self.create_image(x+16,y+10,image=icon,anchor='nw',tags=(tag,'provider-logo'))
+            room=card_width-(left-x)-68
+            if self.name_font.measure(name)>room:
+                while name and self.name_font.measure(name+'…')>room:name=name[:-1]
+                name+='…'
+            label(self,left,y+12,name,font=self.name_font,tags=tag)
             rounded(self,x+card_width-56,y+10,40,23,6,fill=RAISED,outline='',tags=tag)
             label(self,x+card_width-36,y+21,f"x{cell['weight']:g}",font=(self.owner.mono,9),fill=ACCENT,anchor='center',tags=tag)
             known=cell['windows']
@@ -261,7 +273,7 @@ class Shell:
         self.cells.bind('<<TreeviewSelect>>',lambda _:self.detail())
         toolbar=ttk.Frame(parent)
         toolbar.pack(fill='x',pady=18)
-        for text,callback in [('Fazer login',self.login),('Novo perfil',self.add_worker),('Editar conta',self.configure),('Pausar / retomar',self.pause)]:
+        for text,callback in [('Fazer login',self.login),('Novo perfil',self.add_worker),('Editar conta',self.configure),('Pausar / retomar',self.pause),('Remover conta',self.remove_cell)]:
             ttk.Button(toolbar,text=text,command=callback).pack(side='left',padx=(0,10))
         self.details=ttk.Label(parent,text='Selecione uma conta para ver limites, resets e perfis.',style='Muted.TLabel',wraplength=750,justify='left')
         self.details.pack(anchor='w',pady=14)

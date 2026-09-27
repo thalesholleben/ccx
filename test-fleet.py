@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -182,7 +183,7 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(migrated.one('SELECT max_active FROM cells')['max_active'],0)
         self.assertEqual(migrated.one('SELECT max_active FROM service')['max_active'],0)
         with migrated.connect() as db:
-            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],4)
+            self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0],5)
 
     def test_label_migration_and_edit_preserve_auth_jobs_and_identity(self):
         worker=self.cell(weight=5);self.auth(worker)
@@ -207,13 +208,111 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(migrated.one('SELECT weight FROM cells')['weight'],5)
         for invalid in ('','   ','bad\nlabel','x'*49):
             with self.assertRaises(ValueError):migrated.configure('test',name=invalid)
-        other=migrated.add_cell(None,'codex','pro',label='Outra conta')
+        other=migrated.add_cell(None,'codex','plus',label='Outra conta')
         internal=migrated.worker(other)['cell_id']
         self.assertTrue(internal.startswith('cell-'))
         self.assertNotEqual(internal,'Outra conta')
         with self.assertRaisesRegex(ValueError,'display_name_in_use'):migrated.configure(internal,name='Cliente correto',plan='custom',weight=8)
         current=migrated.one('SELECT * FROM cells WHERE id=?',(internal,))
-        self.assertEqual((current['display_name'],current['plan'],current['weight']),('Outra conta','pro',1))
+        self.assertEqual((current['display_name'],current['plan'],current['weight']),('Outra conta','plus',1))
+
+    def test_codex_plans_and_legacy_weight_preservation(self):
+        from fleet.cli import main
+        for name,plan,weight in [('plus','plus',1),('codex-pro','pro',5),('claude-pro','pro',1)]:
+            provider='claude' if name=='claude-pro' else 'codex'
+            self.store.add_cell(name,provider,plan)
+            self.assertEqual(self.store.one('SELECT weight FROM cells WHERE id=?',(name,))['weight'],weight)
+        worker=self.store.add_cell('legacy','codex','pro',weight=1)
+        self.store.bind(worker,'synthetic-codex')
+        home=self.store.home(worker);(home/'auth.json').write_text('{"synthetic":"preserve"}')
+        before_worker=self.store.worker(worker)
+        self.store.add_cell('calibrated','codex','pro',weight=3)
+        with self.store.transaction() as db:db.execute('PRAGMA user_version=4')
+        migrated=Store(self.store.root)
+        self.assertEqual(migrated.one("SELECT plan,weight FROM cells WHERE id='legacy'"),{'plan':'plus','weight':1})
+        self.assertEqual(migrated.one("SELECT plan,weight FROM cells WHERE id='calibrated'"),{'plan':'custom','weight':3})
+        self.assertEqual(migrated.worker(worker),before_worker)
+        self.assertEqual((home/'auth.json').read_text(),'{"synthetic":"preserve"}')
+        migrated.configure('legacy',plan='pro')
+        self.assertEqual(Store(self.store.root).one("SELECT plan,weight FROM cells WHERE id='legacy'"),{'plan':'pro','weight':5})
+        for plan in ('max20','pro20'):
+            with self.assertRaises(ValueError):migrated.configure('legacy',plan=plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['--root',str(self.store.root),'cell','add','CLI default','codex']),0)
+        self.assertEqual(migrated.one("SELECT plan,weight FROM cells WHERE display_name='CLI default'"),{'plan':'plus','weight':1})
+
+    def test_remove_account_preserves_history_and_releases_identity(self):
+        worker=self.cell();home=self.auth(worker)
+        self.cell('other');other_home=self.store.home(self.store.one("SELECT id FROM workers WHERE cell_id='other'")['id'])
+        job=self.submit(preferred_cell='test');scheduler.dispatch(self.store)
+        with self.assertRaisesRegex(ValueError,'cell_busy'):self.store.remove_cell('test')
+        with self.store.transaction() as db:
+            db.execute("UPDATE jobs SET state='completed' WHERE id=?",(job,))
+            db.execute('UPDATE workers SET job_id=NULL WHERE id=?',(worker,))
+        result=self.store.root/'jobs'/job/'result.json';result.write_text('{"text":"preserved"}')
+        self.store.remove_cell('test')
+        self.assertFalse(home.exists());self.assertTrue(other_home.exists())
+        self.assertFalse(self.store.rows("SELECT * FROM cells WHERE id='test'"))
+        self.assertFalse(self.store.rows('SELECT * FROM workers WHERE id=?',(worker,)))
+        self.assertFalse(self.store.rows('SELECT * FROM reservations WHERE job_id=?',(job,)))
+        self.assertEqual(result.read_text(),'{"text":"preserved"}')
+        history=self.store.snapshot()['jobs'][0]
+        self.assertEqual((history['state'],history['cell_id'],history['worker_id'],history['removed_cell_name']),('completed',None,None,'test'))
+        self.assertFalse((self.store.root/'locks'/('worker-'+worker+'.lock')).exists())
+        self.store.add_cell('test','claude','pro',label='Replacement')
+        self.store.remove_cell('test')
+        self.assertEqual(self.store.snapshot()['jobs'][0]['removed_cell_name'],'test')
+
+    def test_remove_account_guards_and_cleanup_failure(self):
+        worker=self.cell(workers=2);home=self.store.home(worker)
+        other=self.store.one('SELECT id FROM workers WHERE id!=?',(worker,))['id']
+        other_home=self.store.home(other)
+        with self.store.worker_lock(worker):
+            with self.assertRaisesRegex(ValueError,'cell_busy'):self.store.remove_cell('test')
+        with self.store.transaction() as db:db.execute('UPDATE workers SET login=1 WHERE id=?',(worker,))
+        with self.assertRaisesRegex(ValueError,'cell_busy'):self.store.remove_cell('test')
+        with self.store.transaction() as db:db.execute('UPDATE workers SET login=0 WHERE id=?',(worker,))
+        job=self.submit(preferred_cell='test')
+        with self.assertRaisesRegex(ValueError,'cell_has_queued_jobs'):self.store.remove_cell('test')
+        self.assertTrue(home.exists())
+        self.store.cancel(job)
+        original_rmtree=shutil.rmtree
+        def cleanup(path):
+            if path==home:raise PermissionError('synthetic')
+            original_rmtree(path)
+        with patch('fleet.store.shutil.rmtree',side_effect=cleanup):
+            with self.assertRaisesRegex(RuntimeError,'cell_removed_cleanup_pending'):self.store.remove_cell('test')
+        self.assertFalse(self.store.rows("SELECT * FROM cells WHERE id='test'"))
+        self.assertTrue(home.exists())
+        self.assertFalse(other_home.exists())
+        failure=self.store.snapshot()['events'][0]
+        self.assertEqual((failure['kind'],failure['entity']),('cell_profile_cleanup_failed',home.relative_to(self.store.root).as_posix()))
+
+    def test_remove_missing_and_unowned_profiles(self):
+        worker=self.cell();home=self.store.home(worker)
+        assert home.resolve().is_relative_to(self.store.root.resolve())
+        shutil.rmtree(home)
+        self.store.remove_cell('test')
+        self.assertFalse(self.store.rows("SELECT id FROM cells WHERE id='test'"))
+        worker=self.cell();home=self.store.home(worker)
+        (home/'ccx-profile.json').write_text('{bad')
+        with self.assertRaisesRegex(RuntimeError,'cell_removed_cleanup_pending'):self.store.remove_cell('test')
+        self.assertTrue(home.exists())
+        self.assertFalse(self.store.rows("SELECT id FROM cells WHERE id='test'"))
+        self.assertEqual(self.store.snapshot()['events'][0]['entity'],home.relative_to(self.store.root).as_posix())
+
+    def test_submit_revalidates_affinity_inside_removal_transaction(self):
+        self.cell()
+        original=self.store.transaction
+        @contextlib.contextmanager
+        def remove_before_insert():
+            with patch.object(self.store,'transaction',original):
+                self.store.remove_cell('test')
+                with original() as db:yield db
+        with patch.object(self.store,'transaction',remove_before_insert):
+            with self.assertRaisesRegex(ValueError,'not_found'):self.submit(preferred_cell='test')
+        self.assertFalse(self.store.rows('SELECT id FROM jobs'))
+        self.assertFalse((self.store.root/'jobs').exists())
 
     def test_cli_generates_cell_id_and_edits_label(self):
         from fleet.cli import main
@@ -238,7 +337,7 @@ class FleetTests(unittest.TestCase):
         worker=self.store.add_cell(None,'claude',label='Alpha')
         internal=self.store.worker(worker)['cell_id']
         before=self.store.rows('SELECT * FROM cells ORDER BY id')
-        profiles=list((self.base/'profiles').rglob('ccx-profile.json'))
+        profiles=list((self.store.root/'profiles').rglob('ccx-profile.json'))
         with self.assertRaisesRegex(ValueError,'display_name_conflicts_id'):
             self.store.add_cell(None,'claude',label='CONTA-A')
         with self.assertRaisesRegex(ValueError,'display_name_conflicts_id'):
@@ -248,7 +347,7 @@ class FleetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'display_name_in_use'):
             self.store.add_cell(None,'claude',label='ALPHA')
         self.assertEqual(self.store.rows('SELECT * FROM cells ORDER BY id'),before)
-        self.assertEqual(list((self.base/'profiles').rglob('ccx-profile.json')),profiles)
+        self.assertEqual(list((self.store.root/'profiles').rglob('ccx-profile.json')),profiles)
         self.assertEqual(len(self.store.rows('SELECT * FROM workers')),2)
         self.assertEqual([c['display_name'] for c in self.store.snapshot()['cells']],['Alpha','Zulu'])
         self.store.configure('conta-a',name='conta-a') # Its own ID remains a valid label.
@@ -570,7 +669,7 @@ class FleetTests(unittest.TestCase):
         first=self.submit()
         self.launch(scheduler.dispatch(self.store))
         eventually(lambda:self.store.one('SELECT state FROM jobs WHERE id=?',(first,))['state']=='failed')
-        eventually(self.settled)
+        eventually(lambda:self.settled() and not self.store.worker(worker)['job_id'])
         self.assertGreater(self.store.worker(worker)['retry_after'],time.time())
         second=self.submit(prompt=json.dumps({'record':str(self.base/'auth-failure.json'),'auth_error':True}))
         self.assertIsNone(scheduler.dispatch(self.store))

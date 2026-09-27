@@ -10,10 +10,16 @@ from tkinter import messagebox, ttk
 
 from . import service, terminal
 from .presentation import Shell, BG
-from .store import plans
+from .store import plans, PLAN_WEIGHTS
 STATE = {'ready':'Autenticada','waiting_auth':'Login pendente','expired_refreshable':'Renovação pendente','queued':'Na fila','starting':'Iniciando',
          'running':'Executando','cancelling':'Cancelando','cancelled':'Cancelada','completed':'Concluída',
          'failed':'Falhou','needs_attention':'Requer atenção'}
+
+
+def plan_choices(provider, current=None):
+    names={'plus':'Plus','pro':'Pro','max5':'Max 5','max20':'Max 20','custom':'Personalizado'}
+    return {(names[plan]+f' x{PLAN_WEIGHTS[provider][plan]}' if plan!='custom' else names[plan]):plan
+            for plan in plans(provider) if plan!='custom' or current=='custom'}
 
 
 class Panel(Shell):
@@ -78,7 +84,12 @@ class Panel(Shell):
             self.cells.move(cell['id'],'','end')
         names={cell['id']:cell.get('display_name') or cell['id'] for cell in data['cells']}
         for job in data['jobs']:
-            self.row(self.jobs,job['id'],job['id'][:8],(terminal.clean(job['title']),STATE.get(job['state'],job['state']),names.get(job['cell_id'],job['cell_id']) or 'Automática',job['reason']))
+            account=names.get(job['cell_id'],job['cell_id']) or (job['removed_cell_name']+' (removida)' if job.get('removed_cell_name') else 'Automática')
+            self.row(self.jobs,job['id'],job['id'][:8],(terminal.clean(job['title']),STATE.get(job['state'],job['state']),account,job['reason']))
+        cell_ids={cell['id'] for cell in data['cells']}
+        for key in self.cells.get_children():
+            if key not in cell_ids:
+                self.cells.delete(key)
         ids={job['id'] for job in data['jobs']}
         for key in self.jobs.get_children():
             if key not in ids:
@@ -111,6 +122,8 @@ class Panel(Shell):
                 free=max(0,100-win['used']-cell['reserved'].get(win['key'],0)-cell['reserve'])*factor/100
                 parts.append(f"{win.get('model') or terminal.duration(win['seconds'])}: folga estimada {free:.2f}x, reset {terminal.reset_label(win['reset'])}")
             self.details.configure(text=' | '.join(parts)+f"\n{len(cell['workers'])} perfis • sem teto fixo de agentes"+(f" • {cell['error']}" if cell['error'] else '')+f"\nID para integrações: {cell['id']}")
+        else:
+            self.details.configure(text='Selecione uma conta para ver limites, resets e perfis.')
 
     def job_detail(self):
         selected=self.jobs.selection()
@@ -134,20 +147,22 @@ class Panel(Shell):
         return dialog,frame,entries
 
     def add_cell(self):
+        choices=plan_choices('claude')
         dialog,frame,fields=self.dialog('Adicionar conta',[
             ('Nome da conta (ex.: Cliente A)','name','',None),('Provedor','provider','claude',['claude','codex']),
-            ('Plano','plan','pro',plans('claude'))])
+            ('Plano','plan',next(iter(choices)),tuple(choices))])
         plan_entry=next(widget for widget in frame.winfo_children()
                         if isinstance(widget,ttk.Combobox) and str(widget.cget('textvariable'))==str(fields['plan']))
         def provider_changed(*_):
-            choices=plans(fields['provider'].get())
-            plan_entry.configure(values=choices)
+            choices=plan_choices(fields['provider'].get())
+            plan_entry.configure(values=tuple(choices))
             if fields['plan'].get() not in choices:
-                fields['plan'].set(choices[0])
+                fields['plan'].set(next(iter(choices)))
         fields['provider'].trace_add('write',provider_changed)
         def save():
             values={k:v.get() for k,v in fields.items()}
-            self.action(lambda:self.store.add_cell(None,values['provider'],values['plan'],label=values['name']))
+            plan=plan_choices(values['provider'])[values['plan']]
+            self.action(lambda:self.store.add_cell(None,values['provider'],plan,label=values['name']))
             dialog.destroy()
         ttk.Button(frame,text='Adicionar conta',style='Accent.TButton',command=save).pack(fill='x',pady=(20,0))
 
@@ -161,15 +176,26 @@ class Panel(Shell):
         cell=next((c for c in self.snapshot['cells'] if c['id']==cell_id),None)
         if not cell:
             return
+        choices=plan_choices(cell['provider'],cell['plan'])
+        current=next(label for label,plan in choices.items() if plan==cell['plan'])
         dialog,frame,fields=self.dialog('Editar conta',[
             ('Nome da conta','name',cell.get('display_name') or cell['id'],None),
-            ('Plano','plan',cell['plan'],plans(cell['provider']))])
+            ('Plano','plan',current,tuple(choices))])
         def save():
             name=fields['name'].get()
-            plan=fields['plan'].get()
+            plan=choices[fields['plan'].get()]
             self.action(lambda:self.store.configure(cell_id,name=name,plan=plan if plan!=cell['plan'] else None))
             dialog.destroy()
         ttk.Button(frame,text='Salvar',command=save).pack(fill='x',pady=15)
+
+    def remove_cell(self):
+        cell_id=self.selected(self.cells)
+        cell=next((c for c in self.snapshot['cells'] if c['id']==cell_id),None)
+        if cell and messagebox.askyesno('Remover conta',
+                'Remover '+(cell.get('display_name') or cell_id)+' do CCX?\n\n'
+                'Os perfis locais e seus logins serão apagados. O histórico das tarefas será preservado.\n'
+                'Isso não cancela a assinatura no provedor.',parent=self.window,default='no'):
+            self.action(lambda:self.store.remove_cell(cell_id))
 
     def login(self):
         cell_id=self.selected(self.cells)

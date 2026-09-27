@@ -16,7 +16,7 @@
 
 ## Why CCX
 
-A Pro account and a Max 20 account at 50% usage do not represent the same remaining
+A Claude Pro account and a Max 20 account at 50% usage do not represent the same remaining
 capacity. CCX selects an account before starting each job, accounts for estimated
 cost and reserves capacity across session, weekly and model-specific limits.
 
@@ -74,12 +74,14 @@ read-only; Claude's read-only mode does not enable shell commands. Specify
 
 | Profile | Session weight | Default weekly weight | Default margin |
 | --- | ---: | ---: | ---: |
-| Pro | 1 | 1 | 10% |
-| Max 5 | 5 | 1 | 10% |
-| Max 20 | 20 | 1 | 10% |
+| Claude Pro | 1 | 1 | 10% |
+| Claude Max 5 | 5 | 1 | 10% |
+| Claude Max 20 | 20 | 1 | 10% |
+| Codex Plus | 1 | 1 | 10% |
+| Codex Pro | 5 | 1 | 10% |
 
-These are scheduling profiles, not guaranteed token allowances. Max profiles
-apply to Claude; Codex supports Pro or custom capacity. Weekly weight remains
+These are scheduling profiles, not guaranteed token allowances. Codex Pro x20 is
+not offered in this version. Custom weights remain available through the CLI. Weekly weight remains
 conservative until calibrated with account evidence. The default task estimate is
 15 equivalent x1 points. Weekly/model limits can block an account with session
 capacity remaining. Usage collected by CCX can age out when the fleet is idle.

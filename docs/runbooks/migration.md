@@ -57,3 +57,13 @@ exposes the same operation in **Editar conta**. Renaming alone keeps custom weig
 Integration commands continue using the immutable ID printed at registration or
 shown in `status`. Names must be printable, nonempty and at most 48 characters;
 duplicate names are refused. Existing account IDs remain valid after the update.
+
+## Provider-specific plans (schema 5)
+
+Codex registration offers Plus x1 and Pro x5; Claude keeps Pro x1, Max 5 x5 and
+Max 20 x20. Stop admission and close the old panel after any active login finishes
+before upgrading. Schema 5 maps the old Codex `pro` x1 preset to `plus`, preserving
+all weights, IDs, profiles and authentication. An old `pro` with a calibrated
+weight becomes `custom` without changing that weight. If the subscription is Pro
+x5, select it in **Editar conta** after the upgrade. The migration does not infer
+subscriptions or multiply existing capacity. Codex Pro x20 is not offered.

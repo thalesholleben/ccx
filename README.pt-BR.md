@@ -6,7 +6,8 @@
 
 ![Painel compacto do CCX com contas sintéticas](docs/assets/fleet-dashboard.png)
 
-Pro x1, Max 5 x5 e Max 20 x20 não têm a mesma capacidade com o mesmo percentual.
+Claude: Pro x1, Max 5 x5 e Max 20 x20. Codex: Plus x1 e Pro x5, sem opção Pro x20.
+Esses perfis não têm a mesma capacidade com o mesmo percentual.
 O CCX escolhe a conta antes de executar, reserva capacidade e mantém um perfil
 independente por agente simultâneo. Sem teto numérico de agentes: cota, perfis
 livres e conflito de escrita determinam a admissão.

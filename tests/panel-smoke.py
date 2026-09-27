@@ -5,6 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 from tkinter import ttk
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from fleet.panel import Panel
@@ -43,6 +44,7 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
             shot.save(target.with_name(target.stem+'-'+suffix+'.png'))
         if panel.current_view=='overview':
             assert not hasattr(panel,'hero') and not hasattr(panel,'recent')
+            assert len(panel.capacity.find_withtag('provider-logo'))==len(panel.snapshot['cells'])
             for cell in panel.snapshot['cells']:
                 assert panel.capacity.find_withtag('cell:'+cell['id']), 'account_hidden'
     def descendants(widget):
@@ -62,16 +64,18 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
         assert len([w for w in descendants(dialog) if isinstance(w,ttk.Entry)])==3
         assert not any('Nova tarefa' in w.cget('text') for w in descendants(panel.window) if isinstance(w,ttk.Button))
         fields['name'].set('cadastro-simples')
-        fields['plan'].set('max20')
+        fields['plan'].set('Max 20 x20')
         fields['provider'].set('codex')
-        assert fields['plan'].get()=='pro'
-        fields['provider'].set('claude'); fields['plan'].set('max20')
+        assert fields['plan'].get()=='Plus x1'
+        plan_entry=next(w for w in descendants(dialog) if isinstance(w,ttk.Combobox) and str(w.cget('textvariable'))==str(fields['plan']))
+        assert tuple(plan_entry.cget('values'))==('Plus x1','Pro x5')
+        fields['plan'].set('Pro x5')
         dialog.update_idletasks()
         next(w for w in descendants(dialog) if isinstance(w,ttk.Button) and w.cget('text')=='Adicionar conta').invoke()
     def check_registration():
         cell=store.one("SELECT * FROM cells WHERE display_name='cadastro-simples'")
         assert cell['id'].startswith('cell-') and cell['id']!='cadastro-simples'
-        assert (cell['weight'],cell['weekly_weight'],cell['reserve'],cell['max_active'])==(20,1,10,0)
+        assert (cell['provider'],cell['plan'],cell['weight'],cell['weekly_weight'],cell['reserve'],cell['max_active'])==('codex','pro',5,1,10,0)
         panel.render(store.snapshot())
     def edit_account():
         panel.open_account('principal-max20')
@@ -93,6 +97,17 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
         assert list(panel.cells.get_children())==[c['id'] for c in store.snapshot()['cells']]
     def later(delay,callback):
         panel.window.after(delay,callback)
+    def remove_account():
+        cell=store.one("SELECT * FROM cells WHERE display_name='cadastro-simples'")
+        panel.open_account(cell['id'])
+        with patch('fleet.panel.messagebox.askyesno',return_value=False):panel.remove_cell()
+        assert store.one('SELECT id FROM cells WHERE id=?',(cell['id'],))
+        with patch('fleet.panel.messagebox.askyesno',return_value=True):panel.remove_cell()
+    def check_removed():
+        assert not store.rows("SELECT * FROM cells WHERE display_name='cadastro-simples'")
+        panel.render(store.snapshot())
+        assert len(panel.cells.get_children())==7
+        assert panel.details.cget('text')=='Selecione uma conta para ver limites, resets e perfis.'
     later(100,registration)
     later(400,check_registration)
     later(500,lambda:panel.window.geometry('1440x820+0+0'))
@@ -109,7 +124,9 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
     later(3400,lambda:capture('activity'))
     later(3600,edit_account)
     later(4000,check_edit)
-    later(4200,panel.window.destroy)
+    later(4200,remove_account)
+    later(4600,check_removed)
+    later(4800,panel.window.destroy)
     panel.window.mainloop()
     if errors:
         raise AssertionError(errors)

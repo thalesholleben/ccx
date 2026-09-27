@@ -23,7 +23,8 @@ Cadastro no painel: label, provedor e plano. `cell add` gera e imprime um ID
 interno único. Substitua `ID_DA_CONTA` nos exemplos pelo ID retornado.
 Use `cell configure ID_DA_CONTA --name "Novo nome"` para editar o label.
 Nome visível e ID são distintos; `--cell` sempre recebe o ID estável. Claude: pro/max5/max20/custom; Codex:
-pro/custom. Não inferir plano a partir de usage 0%. Os nomes de plano do CCX são
+plus (x1), pro (x5) ou custom no CLI. Cadastro sem --plan: Claude pro, Codex plus.
+Codex Pro x20 não é oferecido nesta versão. Não inferir plano a partir de usage 0%. Os nomes de plano do CCX são
 perfis de capacidade, não uma consulta automática à assinatura. O CLI conserva
 ajuste avançado de peso, peso semanal e margem; não alterar sem necessidade e
 evidência. Não existe mais `--max-active`.
@@ -52,6 +53,11 @@ estado final e liberação do worker antes de reexecutar o trabalho.
 Resultados privados: `~/.ccx/fleet/jobs/<id>/result.json`. O JSON de status não
 contém prompt ou token. A UI acompanha tarefas enviadas por integrações; não tem
 formulário para criá-las. Abrir painel: `ccx-panel.cmd` (Windows).
+
+Remoção explícita: `cell remove ID_DA_CONTA --yes`. Remove cadastro e perfis locais,
+preservando histórico e resultados de tarefas. Requer conta ociosa e sem tarefas
+na fila vinculadas por `--cell`; bloqueio de perfil também impede a remoção.
+Não revoga tokens no provedor nem cancela assinatura. Só remover quando pedido.
 
 ## Legado
 

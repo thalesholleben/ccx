@@ -63,8 +63,25 @@ Login adicional na mesma conta depende da coexistência de grants permitida pelo
 provedor. Antes de ampliar workers, valide que os demais perfis e a sessão global
 continuam autenticados. Esse canário exige login humano e não foi substituído por
 testes sintéticos. Conta Codex: `cell add "Nome visível" codex --plan custom --weight 1`;
-o comando imprime o ID para o login e o despacho. O operador informa o peso,
-sem inferir assinatura a partir de uso zero.
+o comando imprime o ID para o login e o despacho. Os presets do Codex são
+`--plan plus` (x1, padrão) e `--plan pro` (x5). Pro x20 fica fora do catálogo desta
+versão. O CLI permite custom com peso explícito, sem inferir assinatura de uso zero.
+
+## Remover uma conta
+
+Selecione a conta e use **Remover conta**. A confirmação explica que cadastro e
+perfis locais, incluindo seus logins, serão apagados. O histórico e os resultados
+das tarefas ficam preservados com a indicação de conta removida. Equivalente no CLI:
+`python ccx-fleet.py cell remove ID_DA_CONTA --yes`.
+
+Login, perfil bloqueado/ocupado, execução ainda viva ou tarefa na fila com afinidade
+explícita impedem a remoção. Finalize ou cancele essas tarefas antes. A operação não
+cancela assinatura nem revoga tokens remotamente. Se o Windows impedir a limpeza
+de um arquivo, o CCX informa remoção parcial e registra `cell_profile_cleanup_failed`;
+o campo `entity` do evento identifica cada diretório residual relativo à pasta
+privada da frota. Todos os perfis são tentados. Perfil já ausente não bloqueia a
+remoção; marcador de posse ausente/corrompido preserva os arquivos e registra a
+limpeza pendente. Perfil redirecionado para outro caminho é recusado.
 
 ## Enviar e acompanhar
 

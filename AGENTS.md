@@ -43,6 +43,10 @@ Pillow is optional for screenshots/icon exports. Runtime must stay stdlib-only.
 - Errors/logs must not reveal credentials or private prompts. Never commit real state.
 - Schema 4 adds display_name without changing IDs or credentials. UI/CLI registration
   generates an internal ID; label edits preserve jobs, reservations and profile paths.
+- Schema 5 separates provider plan weights. Old Codex pro x1 becomes plus; calibrated
+  old pro weights become custom unchanged. Never assume Claude Pro equals Codex Pro.
+- Account removal requires idle unlocked profiles and no queued affinity. Preserve
+  task history/results; delete only validated local profile paths. Report cleanup failures.
 - Registration UI has name/provider/plan only. The dashboard monitors accounts and
   jobs; it does not create tasks.
 

@@ -88,8 +88,9 @@ independente do painel e do serviço. Fechar a UI preserva execução; parar o s
 impede novos despachos e deixa runners vivos concluírem. Não há transferência
 automática de uma tarefa em andamento para outra conta.
 
-Pesos de sessão: Pro 1, Max 5 5, Max 20 20. Peso semanal padrão 1 e margem 10%.
-Custo padrão 15 pontos x1: reserva 15 / 3 / 0,75 pontos de sessão respectivamente,
+Pesos de sessão: Claude Pro 1, Max 5 5, Max 20 20; Codex Plus 1 e Pro 5.
+Codex Pro x20 não é oferecido nesta versão. Peso semanal padrão 1 e margem 10%.
+Custo padrão 15 pontos x1: reserva 15 / 3 / 0,75 pontos de sessão nos pesos x1 / x5 / x20,
 mas 15 pontos semanais com o peso semanal padrão. Percentual igual não significa
 capacidade igual, e semanal/modelo podem vetar a conta com muita folga de sessão.
 

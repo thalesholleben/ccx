@@ -6,10 +6,11 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 import ccx
@@ -20,11 +21,12 @@ ACTIVE = ('starting', 'running', 'cancelling')
 ID = re.compile(r'[a-z0-9][a-z0-9-]{0,47}\Z')
 MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}\Z')
 GUARDS = ('ENTERPRISE_EXECUTOR_DEPTH', 'CROSS_REVIEW_DEPTH', 'ENTERPRISE_WORK_ID')
-PLAN_WEIGHTS = {'pro': 1, 'max5': 5, 'max20': 20, 'custom': 1}
+PLAN_WEIGHTS = {'claude': {'pro': 1, 'max5': 5, 'max20': 20, 'custom': 1},
+                'codex': {'plus': 1, 'pro': 5, 'custom': 1}}
 
 
 def plans(provider):
-    return ('pro', 'custom') if provider == 'codex' else tuple(PLAN_WEIGHTS)
+    return tuple(PLAN_WEIGHTS[provider])
 
 
 def short_name(value):
@@ -72,7 +74,7 @@ class Store:
         self.path = self.root / 'fleet.sqlite3'
         with self.connect() as db:
             version = db.execute('PRAGMA user_version').fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise ValueError('unsupported_schema')
             if version and not migrate:
                 return
@@ -131,7 +133,11 @@ class Store:
                     db.execute("ALTER TABLE cells ADD COLUMN display_name TEXT NOT NULL DEFAULT ''")
                 db.execute("UPDATE cells SET display_name=id WHERE display_name=''")
                 db.execute('CREATE UNIQUE INDEX IF NOT EXISTS cells_display_name ON cells(display_name COLLATE NOCASE)')
-                db.execute('PRAGMA user_version=4')
+                if db.execute('PRAGMA user_version').fetchone()[0] < 5:
+                    # Previous Codex "pro" meant x1. Never inflate an existing
+                    # account's capacity or discard a calibrated custom weight.
+                    db.execute("UPDATE cells SET plan=CASE WHEN weight=1 THEN 'plus' ELSE 'custom' END WHERE provider='codex' AND plan='pro'")
+                db.execute('PRAGMA user_version=5')
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -175,7 +181,7 @@ class Store:
         display_name = short_name(name if label is None else label)
         if not ID.fullmatch(name) or provider not in ('claude', 'codex') or plan not in plans(provider):
             raise ValueError('invalid_cell')
-        weight = PLAN_WEIGHTS[plan] if weight is None else weight
+        weight = PLAN_WEIGHTS[provider][plan] if weight is None else weight
         number(weight, .1, 100)
         number(weekly_weight, .1, 100)
         number(reserve, 0, 80)
@@ -252,7 +258,7 @@ class Store:
             cell = self.one('SELECT provider FROM cells WHERE id=?', (cell_id,))
             if plan not in plans(cell['provider']):
                 raise ValueError('invalid_plan')
-            weight = PLAN_WEIGHTS[plan] if weight is None else weight
+            weight = PLAN_WEIGHTS[cell['provider']][plan] if weight is None else weight
         values = {key:value for key,value in locals().items() if key in ('weight','weekly_weight','reserve') and value is not None}
         for key,value in values.items():
             number(value,0 if key=='reserve' else .1,80 if key=='reserve' else 100)
@@ -268,6 +274,68 @@ class Store:
             if db.execute('UPDATE cells SET '+','.join(key+'=?' for key in values)+' WHERE id=?',(*values.values(),cell_id)).rowcount!=1:
                 raise ValueError('not_found')
             event(db,'cell_configured',cell_id)
+
+    def remove_cell(self, cell_id):
+        homes=[]; pending=[]
+        with ExitStack() as locks:
+            with self.transaction() as db:
+                cell=db.execute('SELECT * FROM cells WHERE id=?',(cell_id,)).fetchone()
+                if not cell:
+                    raise ValueError('not_found')
+                workers=db.execute('SELECT * FROM workers WHERE cell_id=?',(cell_id,)).fetchall()
+                for worker in workers:
+                    try:
+                        locks.enter_context(self.worker_lock(worker['id']))
+                    except BlockingIOError as exc:
+                        raise ValueError('cell_busy') from exc
+                    if worker['login'] or worker['job_id'] or processes.live(worker['pid'],worker['marker']):
+                        raise ValueError('cell_busy')
+                    home=self.root/'profiles'/cell['provider']/worker['id']
+                    if canonical(home)!=os.path.normcase(str(home)):
+                        raise ValueError('profile_redirected')
+                    if not home.exists():
+                        continue
+                    try:
+                        homes.append(self.home(worker['id']))
+                    except (ValueError,ccx.CorruptFile):
+                        pending.append(home) # Unverified ownership: keep the files.
+                if any(json.loads(row['options']).get('cell')==cell_id for row in db.execute("SELECT options FROM jobs WHERE state='queued'")):
+                    raise ValueError('cell_has_queued_jobs')
+                jobs=db.execute("SELECT * FROM jobs WHERE cell_id=? OR worker_id IN (SELECT id FROM workers WHERE cell_id=?) OR json_extract(options,'$.cell')=?",
+                                (cell_id,cell_id,cell_id)).fetchall()
+                if any(job['state'] not in TERMINAL or processes.live(job['pid'],job['marker']) for job in jobs):
+                    raise ValueError('cell_busy')
+                for job in jobs:
+                    options=json.loads(job['options'])
+                    options.setdefault('removed_cell_name',cell['display_name'])
+                    db.execute('UPDATE jobs SET cell_id=NULL,worker_id=NULL,options=? WHERE id=?',
+                               (json.dumps(options),job['id']))
+                db.execute('DELETE FROM reservations WHERE cell_id=?',(cell_id,))
+                db.execute('DELETE FROM workers WHERE cell_id=?',(cell_id,))
+                db.execute('DELETE FROM cells WHERE id=?',(cell_id,))
+                event(db,'cell_removed',cell_id)
+            # The registration is committed before filesystem cleanup. If Windows
+            # still holds a file, report partial completion instead of claiming success.
+            for home in homes:
+                try:
+                    if canonical(home)!=os.path.normcase(str(home)) or not home.is_relative_to(self.root/'profiles'):
+                        raise ValueError('profile_redirected')
+                    shutil.rmtree(home)
+                except (OSError,ValueError):
+                    pending.append(home)
+            if pending:
+                with self.transaction() as db:
+                    for home in pending:
+                        event(db,'cell_profile_cleanup_failed',home.relative_to(self.root).as_posix())
+        for worker in workers:
+            lock=self.root/'locks'/('worker-'+worker['id']+'.lock')
+            try:
+                if canonical(lock)==os.path.normcase(str(lock)):
+                    lock.unlink(missing_ok=True)
+            except OSError:
+                pass # Another process may still have the lock file open.
+        if pending:
+            raise RuntimeError('cell_removed_cleanup_pending')
 
     def submit(self, provider, prompt, cwd, model, *, effort='high', permission='read-only',
                cost=15, priority=0, title='', request_id=None, preferred_cell=None,
@@ -297,10 +365,6 @@ class Store:
             raise ValueError('unsupported_tools')
         if provider == 'claude' and permission == 'read-only' and allowed_tools is not None and any(tool not in ('Read','Glob','Grep') for tool in allowed_tools):
             raise ValueError('read_only_tools_required')
-        if preferred_cell:
-            cell = self.one('SELECT * FROM cells WHERE id=?', (preferred_cell,))
-            if cell['provider'] != provider:
-                raise ValueError('provider_mismatch')
         options = {'model': model, 'effort': effort, 'permission': permission, 'cell': preferred_cell,
                    'guards': guards, 'allowed_tools': allowed_tools, 'persist': bool(persist)}
         fingerprint = hashlib.sha256(json.dumps([provider,prompt,cwd,options,cost,priority,title], sort_keys=True).encode()).hexdigest()
@@ -311,6 +375,12 @@ class Store:
                     if previous['fingerprint'] != fingerprint:
                         raise ValueError('request_id_conflict')
                     return previous['id']
+            if preferred_cell:
+                cell=db.execute('SELECT provider FROM cells WHERE id=?',(preferred_cell,)).fetchone()
+                if not cell:
+                    raise ValueError('not_found')
+                if cell['provider']!=provider:
+                    raise ValueError('provider_mismatch')
             job_id = uuid.uuid4().hex
             folder = self.root / 'jobs' / job_id
             folder.mkdir(parents=True, mode=0o700)
@@ -346,6 +416,6 @@ class Store:
                     cell['reserved'][key] = cell['reserved'].get(key, 0) + amount
             cell['workers'] = self.rows('SELECT id,auth,job_id,login FROM workers WHERE cell_id=?', (cell['id'],))
             cell['active'] = sum(bool(worker['job_id']) for worker in cell['workers'])
-        jobs = self.rows('SELECT id,title,provider,cwd,state,reason,created,started,finished,cell_id,worker_id,cancel,session,exit_code FROM jobs ORDER BY created DESC LIMIT 100')
+        jobs = self.rows("SELECT id,title,provider,cwd,state,reason,created,started,finished,cell_id,worker_id,cancel,session,exit_code,json_extract(options,'$.removed_cell_name') AS removed_cell_name FROM jobs ORDER BY created DESC LIMIT 100")
         return {'schema_version':1, 'at':time.time(), 'service':service, 'cells':cells, 'jobs':jobs,
                 'events':self.rows('SELECT at,kind,entity FROM events ORDER BY id DESC LIMIT 50')}
