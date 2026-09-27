@@ -1,3 +1,6 @@
+> Historical compatibility reference. Global rotation/bridge entry points are retired.
+> Use [fleet mode](../features/fleet.md) and the [migration guide](../runbooks/migration.md).
+
 # Contrato local Claude, versão 1
 
 Entrada implementada: `python ccx.py status --json`. Saída: um objeto JSON em

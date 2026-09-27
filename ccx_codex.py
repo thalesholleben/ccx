@@ -944,6 +944,11 @@ def cmd_auto(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    import sys
+    return ccx.main(list(sys.argv[1:] if argv is None else argv))
+
+
+def _legacy_main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ccx_codex", description=__doc__.split("\n")[0])
     ap.add_argument("--threshold", type=float, default=ccx.DEFAULT_THRESHOLD)
     ap.add_argument(

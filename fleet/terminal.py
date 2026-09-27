@@ -147,3 +147,45 @@ def fleet(snapshot, no_color=False):
             out.line('            '+job['reason'],'90')
     out.rule()
     out.line('  Folga em equivalentes x1; estimativa, sem garantia de tokens.', '90')
+
+
+def compact(snapshot, no_color=False, width=None):
+    """At most three accounts per row; only the two main quota windows."""
+    out=Terminal(no_color,width)
+    columns=3 if out.width>=90 else 2 if out.width>=60 else 1
+    gap='  '
+    size=(out.width-len(gap)*(columns-1))//columns
+    for provider in ('claude','codex'):
+        cells=[cell for cell in snapshot['cells'] if cell['provider']==provider]
+        if not cells:continue
+        out.line(provider.upper(),'1;36')
+        for start in range(0,len(cells),columns):
+            row=cells[start:start+columns]
+            headings=[]
+            for cell in row:
+                suffix=f" x{cell['weight']:g}"
+                name=clean(cell.get('display_name') or cell['id'])
+                if len(name)>size-len(suffix):name=name[:size-len(suffix)-1]+'…'
+                headings.append((name+suffix).ljust(size))
+            out.line(gap.join(headings),'1')
+            for weekly in (False,True):
+                parts=[]
+                for cell in row:
+                    windows=[w for w in cell['windows'] if not w.get('model') and (w['seconds']>86400)==weekly]
+                    window=(max if weekly else min)(windows,key=lambda w:w['seconds'],default=None)
+                    stale=not cell['observed'] or not 0<=snapshot['at']-cell['observed']<=600
+                    state='pausada' if cell['paused'] else 'login' if cell['auth']!='ready' else 'cache' if stale else ''
+                    title='7d' if weekly else '5h'
+                    used=window['used'] if window else None
+                    amount=f'{used:.0f}%' if used is not None else 'n/d'
+                    barsize=max(3,size-18)
+                    if used is None:
+                        bar=('·' if out.unicode else '.')*barsize
+                    else:
+                        filled=round(used/100*barsize)
+                        bar=('█' if out.unicode else '#')*filled+('░' if out.unicode else '.')*(barsize-filled)
+                    content=f'{title} {bar} {amount:>4} {state}'.rstrip().ljust(size)
+                    code='90' if state else '31' if used is not None and used>=90 else '33' if used is not None and used>=70 else '32'
+                    parts.append(out.paint(content,code))
+                print(gap.join(parts).encode(out.encoding,errors='replace').decode(out.encoding))
+    if not snapshot['cells']:out.line('Nenhuma conta cadastrada.')

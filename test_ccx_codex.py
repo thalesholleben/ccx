@@ -26,7 +26,7 @@ def make_jwt(claims: dict) -> str:
 def test_auto_codex_mantem_defaults_compartilhados():
     received = []
     with mock.patch.object(ccx_codex, "cmd_auto", side_effect=lambda args: received.append(args) or 0):
-        assert ccx_codex.main(["auto", "--once"]) == 0
+        assert ccx_codex._legacy_main(["auto", "--once"]) == 0
     assert received[0].threshold == 60.0
     assert received[0].cooldown == 120
 
@@ -706,7 +706,7 @@ def test_flags_invalidas_sao_recusadas():
         ["auto", "--cooldown", "-5"],
     ):
         try:
-            ccx_codex.main(argv)
+            ccx_codex._legacy_main(argv)
             raise AssertionError(f"deveria recusar {argv}")
         except SystemExit as e:
             assert e.code != 0, argv

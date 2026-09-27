@@ -14,19 +14,19 @@ from fleet.store import Store
 with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
     store=Store(Path(temp))
     now=time.time()
-    for name,plan in [('pessoal-pro','pro'),('agentes-max5','max5'),('principal-max20','max20'),
-                      ('revisao','max5'),('pesquisa','pro'),('automacoes','max20'),('apoio','pro')]:
-        worker=store.add_cell(name,'claude',plan)
+    for name,provider,plan,used in [('pessoal-pro','claude','pro',38),('agentes-max5','claude','max5',74),
+                      ('principal-max20','claude','max20',92),('codex-plus','codex','plus',32),('codex-pro','codex','pro',71)]:
+        worker=store.add_cell(name,provider,plan)
         store.bind(worker,'synthetic-'+name)
         with store.transaction() as db:
             db.execute('UPDATE cells SET windows=?,observed=? WHERE id=?',(json.dumps([
-                {'key':'five_hour','used':50,'reset':now+10800,'seconds':18000},
+                {'key':'five_hour','used':used,'reset':now+10800,'seconds':18000},
                 {'key':'seven_day','used':28,'reset':now+172800,'seconds':604800}]),now,name))
     store.submit('claude','Sintético',temp,'claude-opus-5-5',title='Revisar arquitetura da aplicação')
     panel=Panel(store)
     panel.render(store.snapshot())
     errors=[]
-    panel.window.report_callback_exception=lambda *args:errors.append(str(args[1]))
+    panel.window.report_callback_exception=lambda *args:errors.append(''.join(__import__('traceback').format_exception(*args)))
     def grab(window=None):
         from PIL import ImageGrab
         import ctypes
@@ -106,7 +106,7 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
     def check_removed():
         assert not store.rows("SELECT * FROM cells WHERE display_name='cadastro-simples'")
         panel.render(store.snapshot())
-        assert len(panel.cells.get_children())==7
+        assert len(panel.cells.get_children())==5
         assert panel.details.cget('text')=='Selecione uma conta para ver limites, resets e perfis.'
     later(100,registration)
     later(400,check_registration)

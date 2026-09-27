@@ -37,6 +37,8 @@ class Output:
                 self.terminal = True
                 self.failed |= item.get('is_error') is not False or item.get('subtype') != 'success'
                 self.text = item.get('result', '')
+                if isinstance(item.get('structured_output'),dict):
+                    self.text = json.dumps(item['structured_output'],ensure_ascii=False)
                 self.session = item.get('session_id', self.session)
         else:
             if kind == 'thread.started':

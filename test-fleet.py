@@ -569,6 +569,57 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(completed.returncode,0)
         self.assertEqual(json.loads(completed.stdout)['schema_version'],1)
 
+    def test_fleet_stats_replaces_global_rotation(self):
+        self.cell('new-account')
+        with patch('ccx.collect',side_effect=AssertionError('legacy_called')),contextlib.redirect_stdout(io.StringIO()) as stream:
+            self.assertEqual(ccx.main(['--root',str(self.store.root),'stats','--no-color']),0)
+        self.assertIn('new-account',stream.getvalue())
+        self.assertNotIn('TAREFAS',stream.getvalue())
+        for action in ('auto','switch','hook','add'):
+            with contextlib.redirect_stderr(io.StringIO()):self.assertEqual(ccx.main([action]),2)
+
+    def test_slim_status_keeps_three_accounts_and_stale_warning(self):
+        for name in ('account-a','account-b','account-c'):self.cell(name)
+        snapshot=self.store.snapshot()
+        snapshot['cells'][1]['observed']=1
+        for width in (32,64,100,120):
+            with contextlib.redirect_stdout(io.StringIO()) as stream:terminal.compact(snapshot,True,width)
+            lines=stream.getvalue().splitlines()
+            self.assertTrue(all(len(line)<=width for line in lines))
+            self.assertIn('cache',stream.getvalue())
+            if width>=90:
+                self.assertEqual(len(lines),4)
+                self.assertTrue(all(name in lines[1] for name in ('account-a','account-b','account-c')))
+
+    def test_protocol_transport_preserves_permissions_schema_and_guards(self):
+        schema={'type':'object','properties':{'ok':{'type':'boolean'}},'required':['ok'],'additionalProperties':False}
+        for provider,mode in [('claude','bypassPermissions'),('codex','danger-full-access')]:
+            job=self.store.submit(provider,'Test',str(self.base),'model',permission='write',cli_mode=mode,
+                output_schema=schema,persist=False,skip_git_check=True,guards={'CROSS_REVIEW_DEPTH':'1','CROSS_REVIEW_WORK_ID':'test'},
+                allowed_tools=['Read','Bash','Skill'] if provider=='claude' else None)
+            options=json.loads(self.store.one('SELECT options FROM jobs WHERE id=?',(job,))['options'])
+            with patch('fleet.providers.executable',return_value='native.exe'):
+                args=providers.command(provider,options,str(self.base),self.base/'result.txt')
+            self.assertIn(mode,args)
+            self.assertEqual(options['guards']['CROSS_REVIEW_DEPTH'],'1')
+            if provider=='codex':
+                self.assertEqual(args.count('--skip-git-repo-check'),1)
+                self.assertEqual(json.loads((self.base/'output-schema.json').read_text()),schema)
+            else:self.assertEqual(json.loads(args[args.index('--json-schema')+1]),schema)
+        with self.assertRaisesRegex(ValueError,'invalid_cli_permission'):
+            self.store.submit('claude','Test',str(self.base),'model',permission='read-only',cli_mode='bypassPermissions')
+        output=runner.Output('claude')
+        output.accept({'type':'result','subtype':'success','is_error':False,'structured_output':{'ok':True}})
+        self.assertEqual(json.loads(output.text),{'ok':True})
+        self.assertFalse(output.failed)
+
+    def test_protocol_timeout_cancels_queued_work(self):
+        from fleet.client import execute
+        with patch('fleet.client.service.start'),self.assertRaises(subprocess.TimeoutExpired):
+            execute('claude','No account',str(self.base),'model',root=self.store.root,timeout=.1)
+        job=self.store.one('SELECT state,cancel FROM jobs')
+        self.assertEqual((job['state'],job['cancel']),('cancelled',1))
+
     @unittest.skipUnless(os.name=='nt','Windows bootstrap contract')
     def test_restrictive_job_bootstrap(self):
         result=subprocess.run([sys.executable,str(FIXTURE),'--root',str(self.store.root),'_bootstrap'],capture_output=True,timeout=65)
@@ -746,7 +797,7 @@ class FleetTests(unittest.TestCase):
         usage={'1':{'5h':{'pct':42,'resets_at':'2027-01-01T00:00:00Z'},'7d':{'pct':65,'resets_at':'2027-01-01T00:00:00Z'}}}
         stream=io.StringIO()
         with patch('ccx.cmd_status',return_value=0),patch('ccx_codex.load_store',return_value=store),patch('ccx_codex.collect',return_value=(usage,{'1':''},'1')),contextlib.redirect_stdout(stream):
-            ccx.main(['stats'])
+            ccx._legacy_main(['stats'])
         parsed=module.parsear_codex(stream.getvalue())
         self.assertIn('65',str(parsed))
         self.assertNotIn('\x1b',stream.getvalue())

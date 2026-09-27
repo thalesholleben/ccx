@@ -699,4 +699,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit('Bridge global aposentado. Use o CLI oficial na IDE e ccx-fleet.py para agentes.')

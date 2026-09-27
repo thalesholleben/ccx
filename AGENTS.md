@@ -14,7 +14,8 @@ read `skills/ccx/SKILL.md`; this does not authorize extra delegation.
 - `fleet/panel.py`, `presentation.py`, `tray.py`: Tk dashboard and Windows tray.
 - `skills/ccx`: generic distributable skill; `scripts/install-skill.py`: dual installation.
 - `ccx.py`, `ccx_codex.py`, `ccx_runtime.py`: compatibility modules and reused primitives.
-  The global monitor, bridge and their installers are legacy, not the fleet.
+  Global monitor/bridge entry points are retired; installers accept uninstall only.
+  ccx.py stats and ccx_codex.py status route to the fleet.
 
 ## Validate
 
@@ -47,6 +48,8 @@ Pillow is optional for screenshots/icon exports. Runtime must stay stdlib-only.
   old pro weights become custom unchanged. Never assume Claude Pro equals Codex Pro.
 - Account removal requires idle unlocked profiles and no queued affinity. Preserve
   task history/results; delete only validated local profile paths. Report cleanup failures.
+- Protocol transports preserve schema, permissions, tools and recursion guards.
+  Cancellation on timeout must confirm runner exit before another dispatch.
 - Registration UI has name/provider/plan only. The dashboard monitors accounts and
   jobs; it does not create tasks.
 

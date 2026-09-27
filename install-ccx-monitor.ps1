@@ -2,6 +2,7 @@
 param([switch]$Uninstall)
 
 $ErrorActionPreference = 'Stop'
+if (-not $Uninstall) { throw 'Rotacao global aposentada. Use ccx-fleet.py service start. Este script aceita somente -Uninstall.' }
 $taskName = 'Claude Monitor'
 $taskPath = '\CCX\'
 

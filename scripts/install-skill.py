@@ -23,7 +23,7 @@ def install(target, home, force=False):
             relative = original.relative_to(source)
             if not original.is_file() or (destination.parents[1].name == '.claude' and relative.parts[0] == 'agents'):
                 continue
-            if relative.name == 'installation.json' or relative == Path('references/local.md'):
+            if relative.name in ('installation.json','transport.json') or '__pycache__' in relative.parts or original.suffix=='.pyc' or relative == Path('references/local.md'):
                 continue
             output = destination / relative
             output.parent.mkdir(parents=True, exist_ok=True)

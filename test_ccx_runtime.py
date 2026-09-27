@@ -253,7 +253,7 @@ def test_json_command_error_is_structured_sanitized_and_nonzero():
         ccx.write_json(ccx.STORE, store)
         before = ccx.STORE.read_bytes()
         proc = subprocess.run([sys.executable, "-c", "import ccx,sys; from pathlib import Path; "
-                               "ccx.STORE=Path(sys.argv[1]); sys.exit(ccx.main(['status','--json']))", str(ccx.STORE)],
+                               "ccx.STORE=Path(sys.argv[1]); sys.exit(ccx._legacy_main(['status','--json']))", str(ccx.STORE)],
                               cwd=Path(__file__).parent, capture_output=True, text=True, timeout=20)
         assert proc.returncode == 4 and proc.stdout == ""
         assert json.loads(proc.stderr) == {"schema_version": 1, "provider": "claude", "error_code": "store_corrupt"}

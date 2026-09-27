@@ -1,3 +1,6 @@
+> Historical compatibility reference. Global rotation/bridge entry points are retired.
+> Use [fleet mode](../features/fleet.md) and the [migration guide](../runbooks/migration.md).
+
 # Hot-swap de conta do Codex
 
 ## Purpose

@@ -178,7 +178,7 @@ def test_limite_por_modelo_tira_conta_da_rotacao():
 def test_auto_claude_usa_calibracao_propria():
     received = []
     with mock.patch.object(ccx, "cmd_auto", side_effect=lambda args: received.append(args) or 0):
-        assert ccx.main(["auto", "--once"]) == 0
+        assert ccx._legacy_main(["auto", "--once"]) == 0
     assert received[0].threshold == 80.0
     assert received[0].cooldown == 60
 
@@ -285,7 +285,7 @@ def test_hook_checa_sem_poluir_o_stop():
     saida = StringIO()
     with mock.patch.object(ccx, "check_once", return_value=(2, 60)) as check:
         with redirect_stdout(saida):
-            assert ccx.main(["hook"]) == 0
+            assert ccx._legacy_main(["hook"]) == 0
     check.assert_called_once()
     assert saida.getvalue() == "", "hook nao deve aparecer na conversa"
 
@@ -985,7 +985,7 @@ def test_flags_invalidas_sao_recusadas():
     for argv in (["--threshold", "101", "status"], ["--threshold", "0", "status"],
                  ["auto", "--poll", "-1"], ["auto", "--cooldown", "-5"]):
         try:
-            ccx.main(argv)
+            ccx._legacy_main(argv)
             raise AssertionError(f"deveria recusar {argv}")
         except SystemExit as e:
             assert e.code != 0, argv

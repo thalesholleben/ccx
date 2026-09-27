@@ -1,18 +1,48 @@
-# CCX
+<p align="center">
+  <img src="docs/assets/readme-banner.png" width="100%" alt="CCX: Claude Code + Codex, isolated profiles and weighted capacity." />
+</p>
 
-![CCX capacity bars](assets/ccx-icon.png)
+<h1 align="center">CCX</h1>
 
-**A local fleet for Claude Code and Codex agents, with isolated accounts and weighted capacity.**
+<p align="center"><strong>Your agents, across your accounts. Capacity that reflects each plan.</strong></p>
 
-[![Tests](https://github.com/thalesholleben/ccx/actions/workflows/tests.yml/badge.svg)](https://github.com/thalesholleben/ccx/actions/workflows/tests.yml)
-[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![License](https://img.shields.io/github/license/thalesholleben/ccx)](LICENSE)
+<p align="center">
+  <a href="#quickstart">Install</a> ·
+  <a href="#product-preview">Preview</a> ·
+  <a href="#agent-skill">Agent skill</a> ·
+  <a href="docs/features/fleet.md">Fleet guide</a> ·
+  <a href="https://syntaxlab.com.br">SyntaxLab</a> ·
+  <a href="README.pt-BR.md">Português do Brasil</a>
+</p>
 
-[Quickstart](#quickstart) · [Fleet guide](docs/features/fleet.md) · [Agent skill](skills/README.md) · [Migration](docs/runbooks/migration.md) · [Português](README.pt-BR.md)
+<p align="center">
+  <a href="https://github.com/thalesholleben/ccx/actions/workflows/tests.yml"><img src="https://github.com/thalesholleben/ccx/actions/workflows/tests.yml/badge.svg" alt="Tests" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7ae4c6?style=flat-square&amp;labelColor=151d22" alt="MIT license" /></a>
+  <a href="#quickstart"><img src="https://img.shields.io/badge/desktop-Windows-a0b0b7?style=flat-square&amp;labelColor=151d22" alt="Windows desktop" /></a>
+  <a href="#quickstart"><img src="https://img.shields.io/badge/Python-3.12%2B-a0b0b7?style=flat-square&amp;labelColor=151d22&amp;logo=python&amp;logoColor=white" alt="Python 3.12+" /></a>
+  <a href="#agent-skill"><img src="https://img.shields.io/badge/skill-Claude%20Code%20%2B%20Codex-7ae4c6?style=flat-square&amp;labelColor=151d22" alt="Skill for Claude Code and Codex" /></a>
+</p>
 
-![Compact fleet dashboard showing synthetic Pro, Max 5 and Max 20 accounts](docs/assets/fleet-dashboard.png)
+CCX manages a local fleet of Claude Code and Codex accounts. Register a label,
+provider and plan, sign in through the official CLI, and let the scheduler choose
+an account for each task based on measured limits, plan weights and reserved
+capacity. The compact dashboard monitors the fleet; the execution service keeps
+working when you close it.
 
-*Real application screenshot with synthetic accounts. The desktop interface is currently in Portuguese.*
+**The agent skill is part of the product.** Bundled with CCX and installable in
+Claude Code and Codex, it teaches agents how to inspect limits, respect margins,
+choose an account and dispatch work through isolated profiles. It connects the
+agent's decision to the CLI and the scheduler. [Install the skill](#agent-skill).
+
+> The desktop interface is currently in Portuguese. This README is also available
+> in [Português do Brasil](README.pt-BR.md).
+
+## Product preview
+
+![CCX dashboard with Claude and Codex icons beside aligned account names and plans](docs/assets/fleet-dashboard.png)
+
+*Captured from the real Windows application using synthetic accounts. No real
+account data or credentials appear here.*
 
 ## Why CCX
 
@@ -70,6 +100,15 @@ selection. To authorize file changes, add `--permission write`. The default is
 read-only; Claude's read-only mode does not enable shell commands. Specify
 `--model` and `--effort` when required. See the [command reference](skills/ccx/references/commands.md).
 
+## Terminal at a glance
+
+`python ccx.py stats` and `python ccx-fleet.py status` show up to three accounts
+per row, grouped by provider, with session and weekly usage only. Bars turn
+amber at 70% and red at 90%. Narrow terminals adapt to one or two columns.
+`cache` means the measurement is older than ten minutes; `n/d` means the provider
+has not reported that window. Use `--refresh` for a fresh read from idle profiles,
+`--details` for diagnostics, or `--json` for integrations.
+
 ## Capacity and execution
 
 | Profile | Session weight | Default weekly weight | Default margin |
@@ -96,7 +135,23 @@ or `cancel`. Closing the panel does not stop execution. Stopping the service
 stops new dispatches; existing runners finish. Restarting Windows is different:
 there is no automatic logon installation or live-job migration between accounts.
 
-## Agent installation
+## Agent skill
+
+The bundled [CCX skill](skills/ccx/SKILL.md) is the operating guide for agents.
+It instructs Claude Code and Codex to read it **before delegating work**, then
+covers commands, internal execution, limits and strategies for choosing an
+account. Automatic selection is the default; `--cell CELL_ID` targets a specific
+account while preserving profile isolation and capacity checks.
+
+The skill teaches agents to:
+
+- Inspect account health and fresh quota measurements before dispatch.
+- Compare weighted headroom across plans, including weekly and model limits.
+- Respect margins, reserve estimated cost and use a free authenticated worker.
+- Preserve permissions, model, effort and workspace isolation.
+- Follow jobs through completion, timeout or cancellation without duplicating work.
+
+Install it for both clients from the repository root:
 
 ```sh
 python scripts/install-skill.py both
@@ -105,13 +160,17 @@ python scripts/install-skill.py both
 Install into Claude Code and Codex's skill directories, then refresh your agent
 session. The skill triggers before calling another agent and teaches explicit
 account targeting without changing global credentials. Details: [skills](skills/README.md).
-Native IDE subagents and custom review runners need an explicit integration;
-installing a skill alone does not route their processes through CCX.
+Protocol runners can integrate through `fleet.client.execute`: it preserves
+model, effort, permissions, tool restrictions, structured output and recursion
+guards. A timeout requests cancellation and confirms runner exit before returning.
+The optional skill transport uses local installation metadata; see the [integration
+guide](skills/README.md). Installing the skill does not intercept native IDE
+subagents or change the IDE account.
 
 ## Migration and compatibility
 
-Fleet mode is the primary interface. Old global rotation commands, hooks and
-Codex bridge are compatibility tools, not the fleet scheduler. Stop fleet admission before updating an existing installation. Follow the
+Fleet mode is the primary interface. Global rotation commands, hooks and the
+Codex bridge are retired. The old installers only accept `-Uninstall`. Stop fleet admission before updating an existing installation. Follow the
 [migration runbook](docs/runbooks/migration.md) to stop old automation without
 interrupting live sessions. Legacy modules remain because the fleet reuses their
 parsers and file/lock primitives; deleting them would break the new runtime.

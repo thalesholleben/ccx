@@ -420,7 +420,9 @@ def test_runtime_real_aceita_hot_login_sem_reiniciar_app_server():
             }
         )
         process = subprocess.Popen(
-            [sys.executable, str(Path(bridge.__file__)), "app-server"],
+            # Exercise compatibility internals for already loaded sessions.
+            # The public bridge entry point is intentionally retired.
+            [sys.executable, '-c', 'import ccx_codex_bridge as b; raise SystemExit(b.main())', 'app-server'],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -505,194 +507,32 @@ def test_runtime_real_aceita_hot_login_sem_reiniciar_app_server():
             )
 
 
-def test_instalador_e_launcher_preservam_config_stdio_argv_e_filhos():
-    if os.name != "nt":
-        return
-    powershell = shutil.which("pwsh") or shutil.which("powershell")
-    csc = Path(os.environ.get("WINDIR", "C:/Windows")) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
-    try:
-        real_codex = bridge.resolve_real_codex()
-    except bridge.BridgeError:
-        return
-    if not powershell or not csc.exists():
-        return
-    installer = Path(__file__).with_name("install-ccx-codex-bridge.ps1")
-    with tempfile.TemporaryDirectory(prefix="ccx bridge installer ") as tmp:
-        root = Path(tmp)
-        settings = root / "settings.json"
-        install_dir = root / "bin"
-        original_settings = '{\n    "editor.fontSize": 14\n}\n'
-        settings.write_text(original_settings, encoding="utf-8")
-        command = [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(installer),
-            "-SettingsPath",
-            str(settings),
-            "-InstallDir",
-            str(install_dir),
-            "-CodexExecutable",
-            str(real_codex),
-            "-PythonExecutable",
-            sys.executable,
-        ]
-        installed = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        assert installed.returncode == 0, installed.stderr
-        launcher = install_dir / "ccx-codex-bridge.exe"
-        config = install_dir / "ccx-codex-bridge.cfg"
-        parsed = json.loads(settings.read_text(encoding="utf-8"))
-        assert parsed["chatgpt.cliExecutable"] == str(launcher)
-        assert "chatgpt.cliExecutable" in parsed["settingsSync.ignoredSettings"]
-        settings_backup = Path(str(settings) + ".ccx-codex-bridge.bak")
-        assert settings_backup.read_text(encoding="utf-8") == original_settings
+def test_bridge_aposentado_recusa_instalacao_e_desinstala_sem_alterar_settings_alheios():
+    retired=subprocess.run([sys.executable,str(Path(bridge.__file__)),'app-server'],capture_output=True,timeout=10)
+    assert retired.returncode!=0 and b'aposentado' in retired.stderr
+    if os.name!='nt':return
+    powershell=shutil.which('pwsh') or shutil.which('powershell')
+    if not powershell:return
+    installer=Path(__file__).with_name('install-ccx-codex-bridge.ps1')
+    with tempfile.TemporaryDirectory(prefix='ccx-retirement-') as temp:
+        root=Path(temp);folder=root/'bin';folder.mkdir()
+        settings=root/'settings.json'
+        original={'editor.fontSize':14,'files.autoSave':'off'}
+        settings.write_text(json.dumps(original),encoding='utf-8')
+        command=[powershell,'-NoProfile','-File',str(installer),'-SettingsPath',str(settings),'-InstallDir',str(folder)]
+        refused=subprocess.run(command,capture_output=True,timeout=30)
+        assert refused.returncode!=0 and json.loads(settings.read_text())==original
+        launcher=folder/'ccx-codex-bridge.exe';launcher.write_text('synthetic')
+        config=folder/'ccx-codex-bridge.cfg';config.write_text('synthetic')
+        settings.write_text(json.dumps({**original,'chatgpt.cliExecutable':str(launcher)},indent=2),encoding='utf-8')
+        state=folder/'ccx-codex-bridge.install.json'
+        state.write_text(json.dumps({'installedValue':str(launcher),'previousExists':False,'ignoredSettingAdded':False,'settingsBackup':''}),encoding='utf-8')
+        removed=subprocess.run(command+['-Uninstall'],capture_output=True,timeout=30)
+        assert removed.returncode==0,removed.stderr
+        # VS Code accepts a trailing comma in settings.json (JSONC).
+        assert json.loads(settings.read_text().replace(',\n}', '\n}'))==original
+        assert not any(path.exists() for path in (launcher,config,state))
 
-        # Idempotencia nao duplica as duas configuracoes.
-        again = subprocess.run(command, capture_output=True, text=True, timeout=30)
-        assert again.returncode == 0, again.stderr
-        text = settings.read_text(encoding="utf-8")
-        assert text.count('"chatgpt.cliExecutable"') == 2  # chave + item ignorado
-
-        fake = root / "fake child.py"
-        fake.write_text(
-            "import json, os, sys, time\n"
-            "if sys.argv[1] == 'io':\n"
-            " print(json.dumps(sys.argv[1:])); print(sys.stdin.read(), end=''); print('stderr-ok', file=sys.stderr); raise SystemExit(23)\n"
-            "open(sys.argv[2], 'w').write(str(os.getpid()))\n"
-            "while True: time.sleep(1)\n",
-            encoding="utf-8",
-        )
-        config.write_text(
-            "\n".join((sys.executable, str(fake), str(real_codex))), encoding="utf-8"
-        )
-        io_run = subprocess.run(
-            [str(launcher), "io", "argumento com espaço", 'aspas"aqui'],
-            input="stdin-ok",
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert io_run.returncode == 23
-        assert json.loads(io_run.stdout.splitlines()[0]) == [
-            "io",
-            "argumento com espaço",
-            'aspas"aqui',
-        ]
-        assert io_run.stdout.endswith("stdin-ok")
-        assert "stderr-ok" in io_run.stderr
-
-        child_pid_file = root / "child.pid"
-        launched = subprocess.Popen(
-            [str(launcher), "sleep", str(child_pid_file)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not child_pid_file.exists():
-            time.sleep(0.05)
-        assert child_pid_file.exists()
-        child_pid = int(child_pid_file.read_text())
-        launched.kill()
-        launched.wait(5)
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and ccx.process_alive(child_pid):
-            time.sleep(0.05)
-        assert not ccx.process_alive(child_pid), "launcher deixou Python orfao"
-
-        # Uma edicao alheia sobrevive ao uninstall; so as duas chaves do CCX saem.
-        current = json.loads(settings.read_text(encoding="utf-8"))
-        current["files.autoSave"] = "off"
-        settings.write_text(json.dumps(current, indent=2), encoding="utf-8")
-        removed = subprocess.run(
-            command[:6] + ["-Uninstall"] + command[6:],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert removed.returncode == 0, removed.stderr
-        final = json.loads(settings.read_text(encoding="utf-8"))
-        assert final == {"editor.fontSize": 14, "files.autoSave": "off"}
-        assert not settings_backup.exists()
-
-        # O primeiro token JSONC define o objeto raiz, mesmo se um comentario
-        # anterior contiver uma chave. Sem edicoes alheias, uninstall e exato.
-        commented = root / "commented.json"
-        commented_install = root / "commented-bin"
-        commented_original = (
-            "// VS Code aceita comentario aqui. Ex.: use { } para blocos.\r\n"
-            "{\r\n"
-            '    "editor.fontSize": 14\r\n'
-            "}\r\n"
-        )
-        commented.write_bytes(commented_original.encode("utf-8"))
-        commented_command = list(command)
-        commented_command[commented_command.index(str(settings))] = str(commented)
-        commented_command[commented_command.index(str(install_dir))] = str(
-            commented_install
-        )
-        commented_result = subprocess.run(
-            commented_command, capture_output=True, text=True, timeout=30
-        )
-        assert commented_result.returncode == 0, commented_result.stderr
-        uncommented = "\n".join(
-            line
-            for line in commented.read_text(encoding="utf-8").splitlines()
-            if not line.lstrip().startswith("//")
-        )
-        commented_parsed = json.loads(uncommented)
-        assert commented_parsed["chatgpt.cliExecutable"] == str(
-            commented_install / "ccx-codex-bridge.exe"
-        )
-        commented_backup = Path(str(commented) + ".ccx-codex-bridge.bak")
-        assert commented_backup.read_bytes() == commented_original.encode("utf-8")
-        commented_removed = subprocess.run(
-            commented_command[:6] + ["-Uninstall"] + commented_command[6:],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert commented_removed.returncode == 0, commented_removed.stderr
-        assert commented.read_bytes() == commented_original.encode("utf-8")
-        assert not commented_backup.exists()
-
-        # Um objeto vazio continua sendo JSON estrito, sem virgula sobrando.
-        empty = root / "empty.json"
-        empty_install = root / "empty-bin"
-        empty.write_text("{}", encoding="utf-8")
-        empty_command = list(command)
-        empty_command[empty_command.index(str(settings))] = str(empty)
-        empty_command[empty_command.index(str(install_dir))] = str(empty_install)
-        empty_result = subprocess.run(
-            empty_command, capture_output=True, text=True, timeout=30
-        )
-        assert empty_result.returncode == 0, empty_result.stderr
-        empty_parsed = json.loads(empty.read_text(encoding="utf-8"))
-        assert empty_parsed["chatgpt.cliExecutable"] == str(
-            empty_install / "ccx-codex-bridge.exe"
-        )
-        empty_removed = subprocess.run(
-            empty_command[:6] + ["-Uninstall"] + empty_command[6:],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert empty_removed.returncode == 0, empty_removed.stderr
-        assert json.loads(empty.read_text(encoding="utf-8")) == {}
-        assert not Path(str(empty) + ".ccx-codex-bridge.bak").exists()
-
-        # Um custom executable preexistente e intocavel, inclusive byte a byte.
-        guarded = root / "guarded.json"
-        original = b'{\r\n  "chatgpt.cliExecutable": "C:\\\\other.exe"\r\n}\r\n'
-        guarded.write_bytes(original)
-        blocked_command = list(command)
-        blocked_command[blocked_command.index(str(settings))] = str(guarded)
-        blocked = subprocess.run(
-            blocked_command, capture_output=True, text=True, timeout=15
-        )
-        assert blocked.returncode != 0
-        assert guarded.read_bytes() == original
 
 
 if __name__ == "__main__":

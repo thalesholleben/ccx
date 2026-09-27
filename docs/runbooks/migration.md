@@ -1,7 +1,8 @@
 # Migrating from global rotation to the fleet
 
-Fleet mode is the primary interface. Global rotation and the optional Codex
-bridge do not distribute independent jobs across accounts.
+Fleet mode is the only operational interface. Global rotation commands are
+retired; `ccx.py stats` now reads the fleet. The old installers accept only
+`-Uninstall`. Shared Python helpers remain for parsing and file/process handling.
 
 ## Updating an existing fleet installation
 

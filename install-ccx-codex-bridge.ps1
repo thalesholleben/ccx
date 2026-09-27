@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (-not $Uninstall) { throw 'Bridge global aposentado. Use o CLI oficial na IDE e ccx-fleet.py para agentes. Este script aceita somente -Uninstall.' }
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Launcher = Join-Path $InstallDir "ccx-codex-bridge.exe"

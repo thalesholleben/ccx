@@ -274,22 +274,38 @@ def command(provider, options, cwd, output, login=False):
         if login:
             return [binary, 'auth', 'login']
         argv = [binary, '-p', '--output-format', 'stream-json', '--verbose', '--model', options['model'],
-                '--effort', options['effort'], '--permission-mode', 'plan' if options['permission']=='read-only' else 'acceptEdits',
+                '--effort', options['effort'], '--permission-mode', options.get('cli_mode') or ('plan' if options['permission']=='read-only' else 'acceptEdits'),
                 '--permission-prompts', 'none']
         if options['permission'] == 'read-only':
-            argv += ['--tools', ','.join(options.get('allowed_tools') or ['Read','Glob','Grep'])]
+            tools=options.get('allowed_tools')
+            argv += ['--tools', ','.join(['Read','Glob','Grep'] if tools is None else tools)]
         elif options.get('allowed_tools') is not None:
-            argv += ['--tools', ','.join(options['allowed_tools'])]
+            tools=options['allowed_tools']
+            argv += ['--tools', ','.join(dict.fromkeys(tool.split('(')[0] for tool in tools))]
+            if tools:argv += ['--allowedTools', ','.join(tools)]
+        if options.get('output_schema') is not None:
+            argv += ['--json-schema', json.dumps(options['output_schema'])]
+        if options.get('disable_slash_commands'):
+            argv += ['--disable-slash-commands']
+        if options.get('strict_mcp'):argv += ['--strict-mcp-config']
+        if options.get('restricted'):argv += ['--restricted']
         if not options.get('persist', True):
             argv += ['--no-session-persistence']
         return argv
     prefix = [binary, '-c', 'cli_auth_credentials_store="file"']
     if login:
         return prefix + ['login']
+    extra=[]
+    if options.get('ignore_user_config'):extra += ['--ignore-user-config']
+    if options.get('output_schema') is not None:
+        schema_path=Path(output).with_name('output-schema.json')
+        ccx.write_json(schema_path,options['output_schema'])
+        extra += ['--output-schema',str(schema_path)]
+    if options.get('skip_git_check',True): extra += ['--skip-git-repo-check']
     return prefix + ['-c', 'model_reasoning_effort='+json.dumps(options['effort']), 'exec', '--json',
-                     '--color', 'never', '--skip-git-repo-check', '-C', cwd, '-s',
-                     'read-only' if options['permission']=='read-only' else 'workspace-write',
-                     '-m', options['model'], '-o', str(output), *([] if options.get('persist',True) else ['--ephemeral']), '-']
+                     '--color', 'never', '-C', cwd, '-s',
+                     options.get('cli_mode') or ('read-only' if options['permission']=='read-only' else 'workspace-write'),
+                     '-m', options['model'], '-o', str(output), *extra, *([] if options.get('persist',True) else ['--ephemeral']), '-']
 
 
 def login(store, worker_id):

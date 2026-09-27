@@ -20,7 +20,7 @@ TERMINAL = ('completed', 'failed', 'cancelled', 'needs_attention')
 ACTIVE = ('starting', 'running', 'cancelling')
 ID = re.compile(r'[a-z0-9][a-z0-9-]{0,47}\Z')
 MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}\Z')
-GUARDS = ('ENTERPRISE_EXECUTOR_DEPTH', 'CROSS_REVIEW_DEPTH', 'ENTERPRISE_WORK_ID')
+GUARDS = ('ENTERPRISE_EXECUTOR_DEPTH', 'CROSS_REVIEW_DEPTH', 'ENTERPRISE_WORK_ID', 'CROSS_REVIEW_WORK_ID')
 PLAN_WEIGHTS = {'claude': {'pro': 1, 'max5': 5, 'max20': 20, 'custom': 1},
                 'codex': {'plus': 1, 'pro': 5, 'custom': 1}}
 
@@ -339,7 +339,9 @@ class Store:
 
     def submit(self, provider, prompt, cwd, model, *, effort='high', permission='read-only',
                cost=15, priority=0, title='', request_id=None, preferred_cell=None,
-               guards=None, allowed_tools=None, persist=True):
+               guards=None, allowed_tools=None, persist=True, cli_mode=None, output_schema=None,
+               disable_slash_commands=False, skip_git_check=True, strict_mcp=False,
+               restricted=False, ignore_user_config=False):
         if provider not in ('claude', 'codex') or not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 200_000:
             raise ValueError('invalid_prompt_or_provider')
         efforts = ('low','medium','high','max') if provider=='claude' else ('low','medium','high','xhigh')
@@ -361,12 +363,25 @@ class Store:
         if any(key not in GUARDS or not re.fullmatch(r'[a-zA-Z0-9_.-]{1,100}', str(val)) for key, val in guards.items()):
             raise ValueError('invalid_guards')
         if allowed_tools is not None and (provider != 'claude' or not isinstance(allowed_tools, list) or
-                any(tool not in ('Read','Edit','Write','Bash','Glob','Grep','Skill') for tool in allowed_tools)):
+                any(not isinstance(tool,str) or not re.fullmatch(r'(Read|Edit|Write|Bash|Glob|Grep|Skill)(?:\([^\r\n]{1,1000}\))?',tool) for tool in allowed_tools)):
             raise ValueError('unsupported_tools')
         if provider == 'claude' and permission == 'read-only' and allowed_tools is not None and any(tool not in ('Read','Glob','Grep') for tool in allowed_tools):
             raise ValueError('read_only_tools_required')
+        modes = ('plan','default','acceptEdits','bypassPermissions') if provider=='claude' else ('read-only','workspace-write','danger-full-access')
+        if cli_mode is not None and (cli_mode not in modes or
+                (cli_mode in ('plan','read-only')) != (permission=='read-only')):
+            raise ValueError('invalid_cli_permission')
+        if output_schema is not None and (not isinstance(output_schema,dict) or
+                len(json.dumps(output_schema,allow_nan=False))>200_000):
+            raise ValueError('invalid_output_schema')
         options = {'model': model, 'effort': effort, 'permission': permission, 'cell': preferred_cell,
                    'guards': guards, 'allowed_tools': allowed_tools, 'persist': bool(persist)}
+        if cli_mode is not None: options['cli_mode']=cli_mode
+        if output_schema is not None: options['output_schema']=output_schema
+        if disable_slash_commands: options['disable_slash_commands']=True
+        if not skip_git_check: options['skip_git_check']=False
+        for key,value in [('strict_mcp',strict_mcp),('restricted',restricted),('ignore_user_config',ignore_user_config)]:
+            if value: options[key]=True
         fingerprint = hashlib.sha256(json.dumps([provider,prompt,cwd,options,cost,priority,title], sort_keys=True).encode()).hexdigest()
         with self.transaction() as db:
             if request_id:

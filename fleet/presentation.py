@@ -64,7 +64,7 @@ class Capacity(tk.Canvas):
             name=cell.get('display_name') or cell['id']
             icon=self.provider_icons.get(cell['provider'])
             left=x+46 if icon else x+16
-            if icon:self.create_image(x+16,y+10,image=icon,anchor='nw',tags=(tag,'provider-logo'))
+            if icon:self.create_image(x+16,y+31,image=icon,anchor='w',tags=(tag,'provider-logo'))
             room=card_width-(left-x)-68
             if self.name_font.measure(name)>room:
                 while name and self.name_font.measure(name+'…')>room:name=name[:-1]
@@ -78,7 +78,7 @@ class Capacity(tk.Canvas):
             stale=not cell['observed'] or time.time()-cell['observed']>600
             auth='Pausada' if cell['paused'] else 'Login pendente' if cell['auth']!='ready' else 'Leitura vencida' if stale else 'Leitura atual'
             state_color=MUTED if cell['paused'] else WARN if auth!='Leitura atual' else ACCENT
-            label(self,x+16,y+36,cell['provider'].upper()+' / '+cell['plan'].upper(),font=('Segoe UI',8),fill=MUTED,tags=tag)
+            label(self,left,y+36,cell['provider'].upper()+' / '+cell['plan'].upper(),font=('Segoe UI',8),fill=MUTED,tags=tag)
             label(self,x+card_width-16,y+36,auth,font=('Segoe UI',8),fill=state_color,anchor='ne',tags=tag)
             bar_width=(card_width-48)/2
             for column,(title,window) in enumerate((('Sessão',main),('Semanal',weekly))):
@@ -89,7 +89,7 @@ class Capacity(tk.Canvas):
                 if not window: continue
                 used=window['used']; reserved=cell['reserved'].get(window['key'],0)
                 if used:
-                    rounded(self,left,y+91,max(2,bar_width*used/100),5,2,fill=BAD if used>=90 else ACCENT,outline='',tags=tag)
+                    rounded(self,left,y+91,max(2,bar_width*used/100),5,2,fill=BAD if used>=90 else WARN if used>=70 else ACCENT,outline='',tags=tag)
                 if reserved:
                     start=left+bar_width*used/100
                     amount=bar_width*min(reserved,100-used)/100
@@ -141,7 +141,14 @@ class Shell:
         s.configure('Treeview.Heading',background=BG,foreground=MUTED,font=('Segoe UI',9),padding=(10,10),borderwidth=0,relief='flat')
         s.map('Treeview',background=[('selected','#25433d')],foreground=[('selected',TEXT)])
         for orientation in ('Vertical','Horizontal'):
-            s.configure(orientation+'.TScrollbar',background=LINE,troughcolor=BG,arrowcolor=MUTED,borderwidth=0,arrowsize=10)
+            scrollbar=orientation+'.TScrollbar'
+            s.layout(scrollbar,[(orientation+'.Scrollbar.trough',{'sticky':'ns' if orientation=='Vertical' else 'ew',
+                'children':[(orientation+'.Scrollbar.thumb',{'sticky':'nswe'})]})])
+            s.configure(scrollbar,background='#35464f',troughcolor=BG,bordercolor=BG,
+                        lightcolor='#35464f',darkcolor='#35464f',borderwidth=0,width=8,arrowsize=8,gripcount=0)
+            s.map(scrollbar,background=[('pressed',ACCENT),('active','#637c87')],
+                  lightcolor=[('pressed',ACCENT),('active','#637c87')],
+                  darkcolor=[('pressed',ACCENT),('active','#637c87')])
         s.configure('TEntry',fieldbackground=CARD,foreground=TEXT,insertcolor=TEXT,padding=8,bordercolor=LINE)
         s.map('TEntry',bordercolor=[('focus',ACCENT)])
         s.configure('TCombobox',fieldbackground=CARD,background=RAISED,foreground=TEXT,arrowcolor=ACCENT,padding=8)

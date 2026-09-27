@@ -59,12 +59,21 @@ preservando histórico e resultados de tarefas. Requer conta ociosa e sem tarefa
 na fila vinculadas por `--cell`; bloqueio de perfil também impede a remoção.
 Não revoga tokens no provedor nem cancela assinatura. Só remover quando pedido.
 
-## Legado
+## Consulta rápida e protocolos
 
-`ccx.py stats`, `ccx.py switch` e `ccx_codex.py switch` pertencem ao monitor
-antigo. Não operam células. Consulte o runbook de migração do repositório se
-precisar desativar hooks, monitores ou bridge antigos. Não os reative para
-despachar pela frota, nem remova o registro de um bridge vivo.
+`ccx.py stats` é um alias do status compacto da frota: três contas por linha,
+agrupadas por provedor. `status --details` mostra perfis, reservas e tarefas.
+`status --refresh` atualiza perfis ociosos sob o mesmo lock de login/execução.
+`cache` é leitura vencida, nunca cota zero. `n/d` é janela não informada.
+Comandos globais `auto`, `switch` e `hook` foram aposentados; não escolha conta por eles.
+
+Runners podem usar `fleet.client.execute` e o transporte opcional da skill.
+Preserve `cli_mode`, `output_schema`, `allowed_tools`, persistência e guardas.
+Modos amplos só quando o protocolo já os autoriza. No CLI, `--cli-mode`,
+`--output-schema ARQUIVO`, `--strict-mcp`, `--restricted`, `--ignore-user-config`
+e `--ephemeral` preservam contratos de integrações. `--cancel-on-timeout`
+pede cancelamento e aguarda a liberação do worker; sem essa opção, `run --timeout`
+continua preservando a tarefa. Perfil da IDE e conversas abertas não são migrados.
 
 Esforços listados aqui são os aceitos pelo CCX. Se o pedido usar outro nível,
 informe que ainda não é suportado pela frota; não reduza o esforço silenciosamente.

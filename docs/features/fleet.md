@@ -116,8 +116,9 @@ python examples\dispatch-agent.py --provider claude --work-id revisao-123 --cwd 
 ```
 
 Esse exemplo preserva as guardas de recursão e cancela explicitamente ao exceder o
-prazo, aguardando confirmação. O executor global e o runner de cross-review seguem
-inalterados; não há migração automática de rotinas para a frota.
+prazo, aguardando confirmação. Integrações podem usar `fleet.client.execute` para preservar schema, permissões,
+ferramentas e guardas do seu protocolo. A skill fornece um transporte opcional;
+runners precisam integrá-lo explicitamente. Não há interceptação automática da IDE.
 
 ## Como a capacidade é calculada
 
@@ -161,9 +162,11 @@ de backoff. Não há nova tentativa automática da tarefa que falhou.
 
 ## Status e painel
 
-`ccx-fleet.py status` mostra a frota no terminal; `--no-color` ou `NO_COLOR`
-removem cores, e `--json` fornece dados para integrações. `ccx.py stats` e
-`ccx_codex.py status` são status do legado, não da frota.
+`ccx-fleet.py status`, `ccx.py stats` e `ccx_codex.py status` mostram a frota
+compacta, com três contas por linha agrupadas por provedor. `--details` inclui
+perfis, reservas e tarefas; `--refresh` mede perfis ociosos. `--no-color` ou
+`NO_COLOR` removem cores, e `--json` fornece dados para integrações. Barras ficam
+amarelas em 70% e vermelhas em 90%; `cache` indica leitura vencida.
 
 O painel abre em **Capacidade**, com indicadores slim e todas as contas em cards
 compactos, uso de sessão/semanal e folga estimada. Estado sem leitura nunca aparece

@@ -31,8 +31,7 @@ python ccx-fleet.py service status
 
 - **Frota pronta:** selecione o provedor/modelo pedido e despache pela frota.
 - **Frota sem contas/perfis autenticados:** não envie uma tarefa que ficará na fila
-  indefinidamente. Informe o login pendente. Um executor legado já autorizado pode
-  continuar sendo usado, deixando explícito que ele está fora da frota.
+  indefinidamente. Informe o login pendente. Não reative a rotação global como fallback.
 - **Executor nativo da plataforma:** ferramentas de subagente da IDE não passam
   automaticamente pelo CCX e não oferecem escolha de conta por esta skill. Não
   prometa isolamento de contas que o executor não implementa.
@@ -117,5 +116,6 @@ não abra perfil gerenciado fora do CCX e não edite SQLite/arquivos de autentic
 manualmente. Use o CLI para mudanças. Nunca coloque token, e-mail real, prompt
 privado ou dados de contas em logs públicos, issues, screenshots ou commits.
 
-`ccx.py stats` consulta o modo legado; a frota usa `ccx-fleet.py status`. Troca
-global não migra automaticamente clientes persistentes nem tarefas da frota.
+`ccx.py stats` e `ccx-fleet.py status` consultam a frota em formato compacto.
+`--details` inclui diagnóstico; `--refresh` mede perfis ociosos; `--json` é para
+integrações. Rotação global (`auto`, `switch`, `hook`) está aposentada.

@@ -37,9 +37,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='ccx fleet',description='Frota local de agentes por contas isoladas.')
     parser.add_argument('--root',type=Path,help='estado isolado (padrao ~/.ccx/fleet)')
     sub = parser.add_subparsers(dest='action',required=True)
-    status = sub.add_parser('status')
+    status = sub.add_parser('status',aliases=['stats'])
     status.add_argument('--json',action='store_true')
     status.add_argument('--no-color',action='store_true')
+    status.add_argument('--details',action='store_true',help='inclui perfis, reservas e tarefas')
+    status.add_argument('--refresh',action='store_true',help='atualiza limites de perfis ociosos')
+    status.add_argument('--visual',action='store_true',help=argparse.SUPPRESS)
     daemon = sub.add_parser('service')
     daemon.add_argument('operation',choices=('start','status','stop'))
     sub.add_parser('panel')
@@ -84,6 +87,12 @@ def main(argv=None):
         command.add_argument('--cell')
         command.add_argument('--allowed-tools',help='Claude: lista separada por virgula')
         command.add_argument('--ephemeral',action='store_true')
+        command.add_argument('--cli-mode',choices=('plan','default','acceptEdits','bypassPermissions','read-only','workspace-write','danger-full-access'))
+        command.add_argument('--output-schema',type=Path)
+        command.add_argument('--strict-mcp',action='store_true')
+        command.add_argument('--restricted',action='store_true')
+        command.add_argument('--ignore-user-config',action='store_true')
+        command.add_argument('--cancel-on-timeout',action='store_true')
         if action=='run':
             command.add_argument('--timeout',type=float,default=0)
     command = sub.add_parser('wait')
@@ -110,12 +119,16 @@ def main(argv=None):
             elif args.operation=='stop':
                 service.stop(store)
             print(json.dumps(service.status(store)))
-        elif args.action=='status' or (args.action=='cell' and args.operation=='list'):
+        elif args.action in ('status','stats') or (args.action=='cell' and args.operation=='list'):
+            if getattr(args,'refresh',False):
+                for cell in store.rows('SELECT id FROM cells'):
+                    providers.poll_cell(store,cell['id'])
             snapshot = store.snapshot()
             if getattr(args,'json',False):
                 print(json.dumps(snapshot,ensure_ascii=False,allow_nan=False))
             else:
-                terminal.fleet(snapshot,getattr(args,'no_color',False))
+                display=terminal.fleet if getattr(args,'details',False) or args.action=='cell' else terminal.compact
+                display(snapshot,getattr(args,'no_color',False))
         elif args.action=='cell':
             if args.operation=='add':
                 worker=store.add_cell(None,args.provider,args.plan or plans(args.provider)[0],args.weight,args.weekly_weight,args.reserve,label=args.name)
@@ -146,10 +159,19 @@ def main(argv=None):
             job = store.submit(args.provider,prompt,args.cwd,args.model or ('claude-opus-5-5' if args.provider=='claude' else 'gpt-6-sol'),
                 effort=args.effort,permission=args.permission,cost=args.cost,priority=args.priority,title=args.title,
                 request_id=args.request_id,preferred_cell=args.cell,guards={k:os.environ[k] for k in GUARDS if k in os.environ},
-                allowed_tools=args.allowed_tools.split(',') if args.allowed_tools is not None else None,persist=not args.ephemeral)
+                allowed_tools=args.allowed_tools.split(',') if args.allowed_tools else [] if args.allowed_tools=='' else None,persist=not args.ephemeral,
+                cli_mode=args.cli_mode,output_schema=json.loads(args.output_schema.read_text(encoding='utf-8')) if args.output_schema else None,
+                strict_mcp=args.strict_mcp,restricted=args.restricted,ignore_user_config=args.ignore_user_config)
             print(job,file=sys.stderr if args.action=='run' else sys.stdout)
             if args.action=='run':
-                return wait(store,job,max(0,args.timeout))
+                code=wait(store,job,max(0,args.timeout))
+                if code==124 and args.cancel_on_timeout:
+                    store.cancel(job)
+                    confirmed=wait(store,job,110)
+                    if confirmed==124:
+                        print('Cancelamento ainda não confirmado: '+job,file=sys.stderr)
+                        return 2
+                return code
         elif args.action=='wait':
             return wait(store,args.job,max(0,args.timeout))
         elif args.action=='cancel':
