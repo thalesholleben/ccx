@@ -76,6 +76,8 @@ class Store:
             version = db.execute('PRAGMA user_version').fetchone()[0]
             if version not in (0, 1, 2, 3, 4, 5):
                 raise ValueError('unsupported_schema')
+            if version == 5:
+                return  # Opening current state must not compete for the writer lock.
             if version and not migrate:
                 return
             if version in (1, 2):

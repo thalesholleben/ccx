@@ -49,7 +49,7 @@ def status(store):
 
 
 def start(store):
-    with processes.file_lock(store.root / 'locks' / 'bootstrap.lock'):
+    with processes.waiting_lock(store.root / 'locks' / 'bootstrap.lock',timeout=30):
         current = status(store)
         if current['alive']:
             if current['stop']:

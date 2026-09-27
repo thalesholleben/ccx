@@ -50,6 +50,11 @@ class FleetTests(unittest.TestCase):
         try:
             eventually(lambda:not service.status(self.store)['alive'],15)
             eventually(lambda:self.settled(),15)
+            def service_unlocked():
+                try:
+                    with processes.file_lock(self.store.root/'locks/service.lock'):return True
+                except BlockingIOError:return False
+            eventually(service_unlocked,15)
         finally:
             for job in self.store.rows('SELECT id FROM jobs'):
                 processes.remove_task(self.store.root,'job-'+job['id'])
@@ -58,7 +63,7 @@ class FleetTests(unittest.TestCase):
 
     def settled(self):
         service.reconcile(self.store)
-        return not any(processes.live(j['pid'],j['marker']) for j in self.store.rows('SELECT * FROM jobs'))
+        return not self.store.rows('SELECT id FROM workers WHERE job_id IS NOT NULL') and not any(processes.live(j['pid'],j['marker']) for j in self.store.rows('SELECT * FROM jobs'))
 
     def cell(self,name='test',weight=1,workers=1,weekly=0):
         worker=self.store.add_cell(name,'claude','custom',weight=weight)
@@ -620,6 +625,12 @@ class FleetTests(unittest.TestCase):
         job=self.store.one('SELECT state,cancel FROM jobs')
         self.assertEqual((job['state'],job['cancel']),('cancelled',1))
 
+    def test_open_current_store_does_not_require_writer_lock(self):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with self.store.transaction():
+                opened=pool.submit(Store,self.store.root)
+                self.assertEqual(opened.result(timeout=2).path,self.store.path)
+
     @unittest.skipUnless(os.name=='nt','Windows bootstrap contract')
     def test_restrictive_job_bootstrap(self):
         result=subprocess.run([sys.executable,str(FIXTURE),'--root',str(self.store.root),'_bootstrap'],capture_output=True,timeout=65)
@@ -788,19 +799,17 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(result['session'],'synthetic-session')
         self.assertIn('codex',json.loads(record.read_text())['home'])
 
-    def test_legacy_stats_parser_compatibility(self):
+    def test_workspace_quota_consumer_uses_fleet_json(self):
         parser_path=REPO.parent/'gerentes'/'nucleo'/'cota.py'
-        if not parser_path.is_file(): self.skipTest('workspace parser unavailable in review checkout')
+        if not parser_path.is_file():self.skipTest('workspace consumer unavailable in public package')
         sys.path.insert(0,str(parser_path.parents[1]))
         from nucleo import cota as module
-        store={'slots':{'1':{'email':'synthetic@example.test'}},'pinned_slot':'1'}
-        usage={'1':{'5h':{'pct':42,'resets_at':'2027-01-01T00:00:00Z'},'7d':{'pct':65,'resets_at':'2027-01-01T00:00:00Z'}}}
-        stream=io.StringIO()
-        with patch('ccx.cmd_status',return_value=0),patch('ccx_codex.load_store',return_value=store),patch('ccx_codex.collect',return_value=(usage,{'1':''},'1')),contextlib.redirect_stdout(stream):
-            ccx._legacy_main(['stats'])
-        parsed=module.parsear_codex(stream.getvalue())
-        self.assertIn('65',str(parsed))
-        self.assertNotIn('\x1b',stream.getvalue())
+        self.cell()
+        cfg={'caminhos':{'ccx_py':'ccx-fleet.py'},'cota':{'max_7d':75}}
+        with patch.object(module.base,'rodar_json',return_value=(self.store.snapshot(),'')) as query:
+            parsed=module.ler_claude(cfg)
+        self.assertEqual(parsed,{'5h':50,'7d':0,'motivo':''})
+        self.assertEqual(query.call_args.args[0][-3:],['status','--refresh','--json'])
 
 
 if __name__=='__main__':
