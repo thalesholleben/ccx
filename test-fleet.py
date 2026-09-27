@@ -147,7 +147,7 @@ class FleetTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.submit(guards={'OPENAI_API_KEY':'bad'})
         with self.assertRaises(ValueError): self.submit(allowed_tools=['Bash'])
         with self.assertRaises(ValueError): self.submit(provider='codex',effort='max')
-        with self.assertRaises(ValueError): self.submit(effort='xhigh')
+        with self.assertRaises(ValueError): self.submit(effort='unsupported')
         with self.assertRaises(ValueError): self.submit(cwd='')
 
     def test_schema_one_migration_preserves_accounts(self):
