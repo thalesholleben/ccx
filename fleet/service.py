@@ -85,7 +85,7 @@ def poll_targets(store, now=None):
         active=any(job['state']!='queued' and job['cell_id']==cell['id'] for job in jobs)
         queued=any(job['state']=='queued' and job['provider']==cell['provider'] and
                    json.loads(job['options'])['cell'] in (None,cell['id']) for job in jobs)
-        idle_due=cell['auth']=='ready' and now-cell['observed']>=IDLE_POLL_SECONDS
+        idle_due=cell['auth'] in ('ready','expired_refreshable') and now-cell['observed']>=IDLE_POLL_SECONDS
         if active or (not cell['paused'] and (queued or idle_due)):
             targets.append(cell['id'])
     return targets

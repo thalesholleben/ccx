@@ -837,15 +837,16 @@ class FleetTests(unittest.TestCase):
 
     def test_idle_poll_respects_paused_auth_backoff_and_keeps_queue_cadence(self):
         now=time.time()
-        for name in ('ready','paused','login','backoff'):
+        for name in ('ready','paused','login','backoff','retry'):
             self.cell(name)
         with self.store.transaction() as db:
             db.execute('UPDATE cells SET observed=?,next_poll=0',(now-900,))
             db.execute("UPDATE cells SET paused=1 WHERE id='paused'")
             db.execute("UPDATE cells SET auth='waiting_auth' WHERE id='login'")
             db.execute("UPDATE cells SET error='http_429',next_poll=? WHERE id='backoff'",(now+240,))
+            db.execute("UPDATE cells SET auth='expired_refreshable',next_poll=? WHERE id='retry'",(now+240,))
         self.assertEqual(service.poll_targets(self.store,now),['ready'])
-        self.assertEqual(service.poll_targets(self.store,now+240),['ready','backoff'])
+        self.assertEqual(service.poll_targets(self.store,now+240),['ready','backoff','retry'])
         with self.store.transaction() as db:
             db.execute('UPDATE cells SET observed=?,next_poll=?',(now,now+240))
         self.submit(preferred_cell='ready')
