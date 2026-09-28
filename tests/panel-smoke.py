@@ -2,6 +2,7 @@
 import json
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from tkinter import ttk
@@ -108,6 +109,45 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
         panel.render(store.snapshot())
         assert len(panel.cells.get_children())==5
         assert panel.details.cget('text')=='Selecione uma conta para ver limites, resets e perfis.'
+    def check_refresh():
+        panel.show_view('overview')
+        entered,released=threading.Event(),threading.Event()
+        def query(_):
+            entered.set()
+            assert released.wait(3), 'UI did not release background query'
+            return 5
+        def wait_done():
+            deadline=time.monotonic()+4
+            while panel.refreshing and time.monotonic()<deadline:
+                panel.window.update()
+                time.sleep(.01)
+            assert not panel.refreshing, 'Refresh did not finish'
+            assert not panel.refresh_button.instate(['disabled'])
+        with patch('fleet.panel.providers.refresh_idle',side_effect=query) as refresh:
+            panel.refresh_button.invoke()
+            try:
+                assert entered.wait(1)
+                assert panel.refresh_button.instate(['disabled'])
+                panel.refresh_button.invoke()
+                panel.refresh_limits()
+                painted=[]
+                panel.window.after_idle(lambda:painted.append(True))
+                panel.window.update()
+                assert painted, 'Refresh blocked the UI'
+                assert refresh.call_count==1, 'Duplicate refresh started'
+            finally:
+                released.set()
+            wait_done()
+            assert panel.notice.cget('text')=='5 conta(s) com nova leitura.'
+        with patch('fleet.panel.providers.refresh_idle',return_value=0):
+            panel.refresh_button.invoke()
+            wait_done()
+            assert panel.notice.cget('text').startswith('Sem nova leitura.')
+        with patch('fleet.panel.providers.refresh_idle',side_effect=RuntimeError('synthetic-private-error')):
+            panel.refresh_button.invoke()
+            wait_done()
+            assert panel.notice.cget('text')=='Falha na consulta. Tente novamente.'
+        assert panel.refresh_button.cget('text')=='↻ Atualizar'
     later(100,registration)
     later(400,check_registration)
     later(500,lambda:panel.window.geometry('1440x820+0+0'))
@@ -126,8 +166,11 @@ with tempfile.TemporaryDirectory(prefix='ccx-panel-smoke-') as temp:
     later(4000,check_edit)
     later(4200,remove_account)
     later(4600,check_removed)
-    later(4800,panel.window.destroy)
+    def finish():
+        try:check_refresh()
+        finally:panel.window.destroy()
+    later(4800,finish)
     panel.window.mainloop()
     if errors:
         raise AssertionError(errors)
-print('Tk: cadastro de 3 campos com defaults, todas as contas, 1440/1280/1000, navegação e fechamento sem erro.')
+print('Tk: cadastro, contas, 1440/1280/1000, refresh assíncrono (sucesso/espera/erro), navegação e fechamento sem erro.')

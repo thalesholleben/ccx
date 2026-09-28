@@ -37,6 +37,9 @@ entre a decisão do agente, os comandos do CLI e o escalonador.
 
 ## Veja o painel
 
+Em **Capacidade**, use **↻ Atualizar** para consultar os limites em segundo plano.
+Contas pausadas, perfis ocupados e o intervalo de espera entre consultas são respeitados.
+
 ![Painel do CCX com os ícones Claude e Codex centralizados ao lado do nome e do plano](docs/assets/fleet-dashboard.png)
 
 *Captura da aplicação real no Windows, usando contas sintéticas. Nenhum dado de
@@ -107,3 +110,8 @@ uso e tempo até o reset em horas, por exemplo `50% reset 2.5h`. `reset n/d`
 significa reset não informado; `reset pend.`, horário já passado aguardando nova
 leitura. Use `--refresh` para medir perfis ociosos elegíveis, `--details` para
 diagnóstico e idade da leitura, e `--json` para integrações.
+
+Com o serviço ligado, contas autenticadas e não pausadas atualizam a cada
+15 minutos mesmo sem agentes e com o painel fechado. Isso acompanha também o
+consumo pela IDE. Execuções e fila mantêm coleta mais frequente; falhas do
+provedor respeitam o intervalo de espera e podem atrasar a leitura.

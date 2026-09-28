@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import service, terminal
+from . import providers, service, terminal
 from .presentation import Shell, BG
 from .store import plans, PLAN_WEIGHTS
 STATE = {'ready':'Autenticada','waiting_auth':'Login pendente','expired_refreshable':'Renovação pendente','queued':'Na fila','starting':'Iniciando',
@@ -25,6 +25,7 @@ def plan_choices(provider, current=None):
 class Panel(Shell):
     def __init__(self, store):
         self.store, self.messages, self.busy = store, queue.Queue(), False
+        self.refreshing = False
         self.snapshot = {'cells':[], 'jobs':[]}
         self.build_shell()
         self.window.after(50,self.tick)
@@ -37,6 +38,22 @@ class Panel(Shell):
 
     def state_label(self,state):
         return STATE.get(state,state)
+
+    def refresh_limits(self):
+        if self.refreshing:
+            return
+        self.refreshing=True
+        self.refresh_button.configure(text='↻ Consultando...',state='disabled')
+        self.notice.configure(text='Consultando limites...')
+        def task():
+            try:
+                updated=providers.refresh_idle(self.store)
+                message=(f'{updated} conta(s) com nova leitura.' if updated else
+                         'Sem nova leitura. Confira o estado das contas.')
+            except Exception:
+                message='Falha na consulta. Tente novamente.'
+            self.messages.put(('refresh_done',message))
+        threading.Thread(target=task,daemon=True).start()
 
     def action(self,callback):
         def task():
@@ -58,6 +75,10 @@ class Panel(Shell):
             elif kind=='read_error':
                 self.busy=False
                 self.health.configure(text='Estado indisponível. Tentando novamente...')
+            elif kind=='refresh_done':
+                self.refreshing=False
+                self.refresh_button.configure(text='↻ Atualizar',state='normal')
+                self.notice.configure(text=data)
             else:
                 self.notice.configure(text=data)
                 if kind=='error':

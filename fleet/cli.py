@@ -121,8 +121,7 @@ def main(argv=None):
             print(json.dumps(service.status(store)))
         elif args.action in ('status','stats') or (args.action=='cell' and args.operation=='list'):
             if getattr(args,'refresh',False):
-                for cell in store.rows('SELECT id FROM cells WHERE paused=0 AND next_poll<=?',(time.time(),)):
-                    providers.poll_cell(store,cell['id'],idle_only=True)
+                providers.refresh_idle(store)
             snapshot = store.snapshot()
             if getattr(args,'json',False):
                 print(json.dumps(snapshot,ensure_ascii=False,allow_nan=False))

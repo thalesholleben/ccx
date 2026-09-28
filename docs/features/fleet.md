@@ -147,7 +147,10 @@ iniciada após esse prazo. Isso é conservador e pode segurar a fila temporariam
 Uma tendência recente de consumo também reduz a capacidade admitida.
 
 O coletor usa GET de limites: 180 segundos em célula ativa, 240 em ociosa com fila
-compatível ou em erro. Sem fila nem tarefa ativa, não consulta uso nem renova OAuth.
+compatível ou em erro. Sem fila nem tarefa ativa, contas autenticadas e não
+pausadas são medidas a cada 15 minutos para acompanhar consumo externo à frota,
+inclusive pela IDE. A coleta depende do serviço ligado, mesmo com painel fechado,
+e respeita backoff de erro; falha de rede/provedor pode atrasar a atualização.
 Snapshot pode admitir por até 600 segundos. Reset vencido exige nova leitura.
 Reset nulo com uso conhecido é janela sem reset anunciado, sujeito ao mesmo TTL;
 não vira zero. Uso nulo é ignorado, e vários limites da mesma família de modelo
@@ -173,7 +176,10 @@ fica em `--details`.
 
 O painel abre em **Capacidade**, com indicadores slim e todas as contas em cards
 compactos, uso de sessão/semanal e folga estimada. Estado sem leitura nunca aparece
-como 0%. Não há hero nem criação manual de tarefas. A área Tarefas acompanha o que
+como 0%. O botão **↻ Atualizar**, ao lado de **Adicionar conta**, consulta os limites
+em segundo plano e informa quantas contas receberam nova leitura. Usa as mesmas
+regras de `status --refresh`: preserva contas pausadas, perfis ocupados e o intervalo
+de espera entre consultas. Não há hero nem criação manual de tarefas. A área Tarefas acompanha o que
 os agentes e integrações enviam pelo CLI. Contas e Atividade mantêm os controles
 detalhados. O visual usa grafite, verde menta, tipografia
 local e tabelas com rolagem. Não usa navegador,

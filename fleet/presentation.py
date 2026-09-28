@@ -239,9 +239,12 @@ class Shell:
             text,callback=action
             ttk.Button(frame,text=text,style='Ghost.TButton',command=callback).pack(side='right')
         if subtitle: ttk.Label(parent,text=subtitle,style='Muted.TLabel').pack(anchor='w',pady=(0,12))
+        return frame
 
     def build_overview(self,parent):
-        self.heading(parent,'Capacidade da frota',action=('＋ Adicionar conta',self.add_cell))
+        heading=self.heading(parent,'Capacidade da frota',action=('＋ Adicionar conta',self.add_cell))
+        self.refresh_button=ttk.Button(heading,text='↻ Atualizar',style='Ghost.TButton',command=self.refresh_limits)
+        self.refresh_button.pack(side='right',padx=(0,8))
         self.metrics=tk.Canvas(parent,bg=BG,highlightthickness=0,height=54)
         self.metrics.pack(fill='x',pady=(0,14))
         self.metrics.bind('<Configure>',lambda _:self.draw_metrics())

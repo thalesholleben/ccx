@@ -28,8 +28,10 @@ iniciada depois desse prazo. Reservas ativas continuam inteiras, mesmo se parte 
 consumo já apareceu no uso. A política é deliberadamente conservadora.
 
 Coleta: a cada 180s em conta ativa, 240s em conta ociosa com fila compatível/erro.
-Sem fila ou tarefas ativas, não consulta nem renova desnecessariamente. A tela
-pode mostrar medição vencida; isso não significa conta vazia nem autorização para
+Sem fila ou tarefas ativas, mede contas autenticadas e não pausadas a cada 900s,
+para refletir consumo externo à frota. O serviço deve estar ligado; painel fechado
+não interrompe a coleta. Backoff e falhas do provedor podem atrasar a atualização.
+A tela pode mostrar medição vencida; isso não significa conta vazia nem autorização para
 admitir. Login faz a medição inicial. Reset nulo com uso conhecido permanece
 desconhecido e sujeito ao TTL. HTTP 429 não vira uso 0%.
 

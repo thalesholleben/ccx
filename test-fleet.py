@@ -818,14 +818,39 @@ class FleetTests(unittest.TestCase):
         self.assertEqual(self.store.one('SELECT state,reason FROM jobs WHERE id=?',(job,)),{'state':'failed','reason':'profile_busy_before_start'})
         self.assertFalse(self.store.rows('SELECT * FROM reservations'))
 
-    def test_idle_service_has_no_network_even_after_poll_deadline(self):
-        self.cell()
-        with patch('ccx.http_json') as http,patch('ccx.refresh_token') as refresh:
-            self.assertEqual(service.poll_targets(self.store,time.time()+1000),[])
-            service.cycle(self.store)
-        http.assert_not_called(); refresh.assert_not_called()
-        self.submit()
-        self.assertEqual(service.poll_targets(self.store,time.time()+1000),['test'])
+    def test_idle_service_updates_usage_every_fifteen_minutes_without_jobs(self):
+        worker=self.cell();self.auth(worker,expired=False)
+        observed=self.store.one('SELECT observed FROM cells')['observed']
+        raw={'five_hour':{'utilization':6,'resets_at':observed+18000}}
+        with patch('ccx.http_json',return_value=raw) as http,patch('ccx.refresh_token') as refresh:
+            with patch('time.time',return_value=observed+899):service.cycle(self.store)
+            http.assert_not_called()
+            with patch('time.time',return_value=observed+900):service.cycle(self.store)
+            http.assert_called_once()
+            updated=self.store.one('SELECT observed,windows FROM cells')
+            self.assertEqual(updated['observed'],observed+900)
+            self.assertEqual(json.loads(updated['windows'])[0]['used'],6)
+            self.assertEqual(service.poll_targets(self.store,observed+1799),[])
+            self.assertEqual(service.poll_targets(self.store,observed+1800),['test'])
+        refresh.assert_not_called()
+        self.assertEqual(self.store.rows('SELECT id FROM jobs'),[])
+
+    def test_idle_poll_respects_paused_auth_backoff_and_keeps_queue_cadence(self):
+        now=time.time()
+        for name in ('ready','paused','login','backoff'):
+            self.cell(name)
+        with self.store.transaction() as db:
+            db.execute('UPDATE cells SET observed=?,next_poll=0',(now-900,))
+            db.execute("UPDATE cells SET paused=1 WHERE id='paused'")
+            db.execute("UPDATE cells SET auth='waiting_auth' WHERE id='login'")
+            db.execute("UPDATE cells SET error='http_429',next_poll=? WHERE id='backoff'",(now+240,))
+        self.assertEqual(service.poll_targets(self.store,now),['ready'])
+        self.assertEqual(service.poll_targets(self.store,now+240),['ready','backoff'])
+        with self.store.transaction() as db:
+            db.execute('UPDATE cells SET observed=?,next_poll=?',(now,now+240))
+        self.submit(preferred_cell='ready')
+        self.assertEqual(service.poll_targets(self.store,now+239),[])
+        self.assertEqual(service.poll_targets(self.store,now+240),['ready'])
 
     def test_service_survives_cycle_exception(self):
         result=subprocess.run([sys.executable,str(FIXTURE),'--root',str(self.store.root),'_serve_failure'],capture_output=True,timeout=20)

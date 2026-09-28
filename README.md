@@ -54,7 +54,8 @@ cost and reserves capacity across session, weekly and model-specific limits.
   profile. Accounts sharing an identity cannot be registered as independent pools.
 - **Compact capacity dashboard.** Register a label, provider and plan; edit the label without changing the
   generated account ID or login. Inspect limits,
-  account health and jobs. Tasks arrive through the CLI and integrations.
+  account health and jobs. **↻ Atualizar** refreshes eligible idle accounts in the
+  background, respecting polling intervals. Tasks arrive through the CLI and integrations.
 - **Independent execution.** Closing the dashboard keeps the service and agents
   running. The Windows tray icon opens or hides the panel.
 - **No fixed agent cap.** Admission depends on quotas, free authenticated workers
@@ -124,7 +125,10 @@ These are scheduling profiles, not guaranteed token allowances. Codex Pro x20 is
 not offered in this version. Custom weights remain available through the CLI. Weekly weight remains
 conservative until calibrated with account evidence. The default task estimate is
 15 equivalent x1 points. Weekly/model limits can block an account with session
-capacity remaining. Usage collected by CCX can age out when the fleet is idle.
+capacity remaining. With the service running, authenticated, unpaused accounts
+refresh every 15 minutes even without fleet jobs, including when the panel is
+closed. Active jobs and eligible queued work use faster polling. Provider errors
+respect backoff. Admission still requires a reading no older than ten minutes.
 
 A cell identifies an account/quota pool. Workers hold independent OAuth homes.
 The scheduler reserves capacity and assigns a free worker; a separate runner

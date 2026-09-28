@@ -64,6 +64,8 @@ Não revoga tokens no provedor nem cancela assinatura. Só remover quando pedido
 `ccx.py stats` é um alias do status compacto da frota: três contas por linha,
 agrupadas por provedor. `status --details` mostra perfis, reservas e tarefas.
 `status --refresh` atualiza perfis ociosos sob o mesmo lock de login/execução.
+No painel, **Capacidade → ↻ Atualizar** faz a mesma consulta em segundo plano,
+respeitando contas pausadas, perfis ocupados e o intervalo de espera entre consultas.
 Respeita o próximo horário de coleta e o backoff de erro; não força uma chamada
 por conta a cada comando nem consulta contas pausadas/em uso nesse modo.
 Ao lado do uso, `reset 2.5h` informa as horas restantes. `reset n/d` é horário

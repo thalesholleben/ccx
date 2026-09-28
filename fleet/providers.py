@@ -215,6 +215,17 @@ def fetch(provider, auth):
     return parse_usage(provider, ccx.http_json(urllib.request.Request(url, headers=headers), timeout=8))
 
 
+def refresh_idle(store):
+    """Manual dashboard/CLI refresh with the same idle-profile and retry guards."""
+    updated=0
+    for cell in store.rows('SELECT id,observed FROM cells WHERE paused=0 AND next_poll<=?',(time.time(),)):
+        poll_cell(store,cell['id'],idle_only=True)
+        current=store.one('SELECT observed FROM cells WHERE id=?',(cell['id'],))
+        if current and current['observed']>cell['observed']:
+            updated+=1
+    return updated
+
+
 def poll_cell(store, cell_id, now=None, *, idle_only=False):
     now = time.time() if now is None else now
     cell = store.one('SELECT * FROM cells WHERE id=?', (cell_id,))
